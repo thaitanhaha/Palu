@@ -78,7 +78,7 @@ if __name__ == "__main__":
         "--calib_dataset",
         type=str,
         default="wikitext2",
-        choices=["wikitext2", "c4", "ptb"],
+        choices=["wikitext2", "c4", "ptb", "wikitext2_mini"],
         help="Calibration dataset",
     )
 

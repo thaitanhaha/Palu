@@ -48,6 +48,12 @@ if __name__ == '__main__':
         help='Task to be evaled'
     )
     parser.add_argument(
+        '--limit',
+        default=None,
+        type=int,
+        help='limit number of test for each task'
+    )
+    parser.add_argument(
         '--batch_size',
         default=8,
         type=int,
@@ -80,7 +86,7 @@ if __name__ == '__main__':
         hadamard=args.lt_hadamard
     )
     logger.info("Start running lm_eval zero-shot evaluation...")
-    res = run_lm_eval_zero_shot(model, tokenizer, args.batch_size, task_list=args.tasks)
+    res = run_lm_eval_zero_shot(model, tokenizer, args.batch_size, task_list=args.tasks, limit=args.limit)
     
     # Create directory if it doesn't exist
     output_dir = "./results"
