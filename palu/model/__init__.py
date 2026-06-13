@@ -20,6 +20,7 @@ from .svd_qwen import (
 from .modules import (
     HeadwiseLowRankModule
 )
+from .modules import compute_cka_for_linear, reorder_linear_weight
 
 #TODO Mistral
 

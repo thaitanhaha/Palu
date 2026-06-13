@@ -6,6 +6,7 @@ import click
 from tqdm import tqdm
 from .data_utils import get_calib_data
 from .model import HeadwiseLowRankModule
+from .model import compute_cka_for_linear, reorder_linear_weight
 
 def find_layers(module, layers=[nn.Conv2d, nn.Linear], name=''):
     if type(module) in layers:
@@ -218,6 +219,11 @@ def compress_model_whiten(model, tokenizer, args, dev, selection_result):
         # set ratio
         raw_linear = module_dict[layername]
         info = linear_info[raw_linear]
+
+        # TODO ------------------
+        cka_scores = compute_cka_for_linear(raw_linear, dev)
+        raw_linear = reorder_linear_weight(raw_linear, cka_scores)
+        # ---------------------------
     
         head_wise_svd_linear = HeadwiseLowRankModule.from_linear_whiten(
             raw_linear,
