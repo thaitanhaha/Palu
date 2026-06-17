@@ -71,42 +71,40 @@ def greedy_reorder_from_cka(S: torch.Tensor, group_size: int = 4):
                     best_val = S[i, j]
                     best_pair = (i, j)
 
+        if best_pair is None:
+            remaining = [h for h in range(n) if h not in used]
+            if remaining:
+                groups.append(remaining)
+                used.update(remaining)
+            break
+
         i, j = best_pair
-
         group = [i, j]
-        used.add(i)
-        used.add(j)
+        used.update(group)
 
-        S[i, :] = -1
-        S[:, i] = -1
-        S[j, :] = -1
-        S[:, j] = -1
+        while len(group) < group_size and len(used) < n:
+            best_h = None
+            best_score = -float('inf')
+
+            for h in range(n):
+                if h in used:
+                    continue
+
+                score = S[h, group].mean().item()
+
+                if score > best_score:
+                    best_score = score
+                    best_h = h
+
+            if best_h is not None:
+                group.append(best_h)
+                used.add(best_h)
+            else:
+                break
 
         groups.append(group)
 
-    remaining = [k for k in range(n) if k not in used]
-
-    for h in remaining:
-        best_g = None
-        best_score = -1
-
-        for gi, g in enumerate(groups):
-            if len(g) >= group_size:
-                continue
-
-            score = S[h, g].mean().item()
-
-            if score > best_score:
-                best_score = score
-                best_g = gi
-
-        groups[best_g].append(h)
-        used.add(h)
-
-    perm = []
-    for g in groups:
-        perm.extend(g)
-
+    perm = [h for g in groups for h in g]
     return perm
 
 
@@ -117,11 +115,12 @@ def invert_perm(perm):
     return inv
 
 
-def reorder_linear_weight(raw_linear: torch.nn.Linear, cka_scores):
+def reorder_linear_weight(raw_linear: torch.nn.Linear, cka_scores, group_size):
     # TODO: fix head_dim
     head_dim = 64
 
-    perm = greedy_reorder_from_cka(cka_scores, group_size = 4)
+    perm = greedy_reorder_from_cka(cka_scores, group_size)
+    inv_perm = invert_perm(perm)
 
     W = raw_linear.weight.data
     n_heads = W.size(0) // head_dim
@@ -130,7 +129,13 @@ def reorder_linear_weight(raw_linear: torch.nn.Linear, cka_scores):
     heads = heads[perm]
 
     raw_linear.weight.data = heads.reshape_as(W)
-    return raw_linear
+
+    if raw_linear.bias is not None:
+        bias = raw_linear.bias.data.view(n_heads, head_dim)
+        bias = bias[perm]
+        raw_linear.bias.data = bias.reshape_as(raw_linear.bias.data)
+
+    return raw_linear, inv_perm
 
 
 
