@@ -53,7 +53,7 @@ def _per_head_decomposition_from_weight(weight, rank):
 class HeadwiseLowRankModule(nn.Module):
     """ Headwise low rank module """
 
-    def __init__(self, ranks, in_features, out_features, bias):
+    def __init__(self, ranks, in_features, out_features, bias, inv_perm=None):
         super().__init__()
 
 
@@ -76,6 +76,14 @@ class HeadwiseLowRankModule(nn.Module):
             Us.append(nn.Linear(r, self.group_dim, bias=bias))
 
         self.U = nn.ModuleList(Us)    
+
+
+        if inv_perm is not None:
+            self.register_buffer(
+                "inv_perm", torch.tensor(inv_perm, dtype=torch.long)
+            )
+        else:
+            self.inv_perm = None
         
         
         self.quantized_latents = False
@@ -104,6 +112,7 @@ class HeadwiseLowRankModule(nn.Module):
         """
         return hidden_states
 
+    
     def reconstruct(self, low_rank_latents: torch.Tensor):
         """
             low_rank_latents: Tensor of shape (batch_size, seq_len, r1 + r2 + ... )
@@ -115,10 +124,17 @@ class HeadwiseLowRankModule(nn.Module):
             outputs.append(self.U[i](low_rank_latent))
             total_ranks += self.ranks[i]
 
-        """
-            outputs: Tensor of shape (batch_size, seq_len, out_features)
-        """
-        return torch.cat(outputs, dim=-1)
+        out = torch.cat(outputs, dim=-1)
+
+        if self.inv_perm is not None:
+            head_dim = 64
+            n_heads = self.out_features // head_dim
+            batch, seq, _ = out.shape
+            out = out.view(batch, seq, n_heads, head_dim)
+            out = out[:, :, self.inv_perm, :]
+            out = out.view(batch, seq, self.out_features)
+
+        return out
     
     
     def quantize_latent(self, low_rank_latents: torch.Tensor):
@@ -171,8 +187,9 @@ class HeadwiseLowRankModule(nn.Module):
     def from_linear_whiten(
         old_module: nn.Linear,
         ranks: list,
-    ):   
-        new_module = HeadwiseLowRankModule(ranks, old_module.in_features, old_module.out_features, bias=old_module.bias is not None)
+        inv_perm=None,
+    ):
+        new_module = HeadwiseLowRankModule(ranks, old_module.in_features, old_module.out_features, bias=old_module.bias is not None, inv_perm=inv_perm)
         w = old_module.weight.data.reshape(len(ranks), -1, old_module.in_features)
         # Handle the cases where the bias is not None
         if old_module.bias is not None:
@@ -203,6 +220,60 @@ class HeadwiseLowRankModule(nn.Module):
         
         return new_module
     
+    @staticmethod
+    def from_linear_calibrated(
+        old_module: nn.Linear,
+        ranks: list, # a list with only one scalar
+        inv_perm=None,
+        calib_x=None,
+    ):
+        new_module = HeadwiseLowRankModule(ranks, old_module.in_features, old_module.out_features, bias=old_module.bias is not None, inv_perm=inv_perm)
+        w = old_module.weight.data.reshape(len(ranks), -1, old_module.in_features)
+        # Handle the cases where the bias is not None
+        if old_module.bias is not None:
+            b = old_module.bias.data.reshape(len(ranks), -1)
+
+        XTX = calib_x.to(torch.float32)
+
+        wl = []
+        wr = []
+
+        for i in range(len(ranks)):
+            W = w[i].to(torch.float32)
+            r = ranks[i]
+
+            # STEP 1: SVD
+            Lv, Rv = _per_head_whiten_decomposition_from_weight(W, old_module.scaling_diag_matrix, ranks[i])
+
+            # STEP 2: CLOSED-FORM OFFLINE CALIBRATION
+            # Lv = W @ XTX @ Rv^T @ (Rv @ XTX @ Rv^T)^(-1)
+            Lv_calib = W @ XTX @ Rv.T @ torch.linalg.inv(Rv @ XTX @ Rv.T)
+
+            # Rv = (Lv^T @ Lv)^(-1) @ Lv^T @ W
+            Rv_calib = torch.linalg.inv(Lv_calib.T @ Lv_calib) @ Lv_calib.T @ W
+
+            wl.append(Lv_calib)
+            wr.append(Rv_calib)
+
+        # load to U
+        for i in range(len(ranks)):
+            if new_module.U[i].weight.data.shape != wl[i].shape:
+                raise ValueError(f"{new_module.U[i].weight.data.shape} != {wl[i].shape}")
+            new_module.U[i].weight.data = wl[i].contiguous()
+            # Handle the cases where the bias is not None
+            if old_module.bias is not None:
+                new_module.U[i].bias.data = b[i]
+
+        # load to VT
+        # shape (sum(ranks), hidden_size)
+        VT_weight = torch.cat(wr, dim=0).contiguous()
+        assert new_module.VT.weight.data.shape == VT_weight.shape
+        new_module.VT.weight.data = VT_weight
+        
+        return new_module
+    
+
+
     @staticmethod
     def from_linear(
         old_module: nn.Linear,

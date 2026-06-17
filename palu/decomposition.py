@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch
 import os
 import click
+import re
 from tqdm import tqdm
 from .data_utils import get_calib_data
 from .model import HeadwiseLowRankModule
@@ -30,7 +31,9 @@ def get_whiten_scale_matrix(model, tokenizer, args, dev):
         seqlen=2048
     )
     cache_file = f"cache/whiten/{model_id.replace('/','_')}_w2_scaling_matrices_fp16.pt"
+    xtx_cache_file = f"cache/xtx/{model_id.replace('/','_')}_xtx_matrices_fp16.pt"
     os.makedirs("cache/whiten", exist_ok=True)
+    os.makedirs("cache/xtx", exist_ok=True)
     """
     cache format:
     [
@@ -119,6 +122,7 @@ def get_whiten_scale_matrix(model, tokenizer, args, dev):
     attention_masks = cache['attention_mask']
     position_ids = cache['position_ids']
     scaling_matrices = []
+    xtx_matrices = []
     logger.info("[Decomposition] Start to calculate the scaling matrix in layer-wise manner...")
     for i in tqdm(range(len(layers))):
         layer = layers[i].to(dev)
@@ -145,10 +149,12 @@ def get_whiten_scale_matrix(model, tokenizer, args, dev):
             subset[name].scaling_diag_matrix = subset[name].scaling_diag_matrix.cpu()
         torch.cuda.empty_cache()
         layer_scaling_matrices = {}
+        layer_xtx_matrices = {}
         for name in subset:
             if not ("k_proj" in name or "v_proj" in name):
                 continue
             raw_scaling_diag_matrix = subset[name].scaling_diag_matrix.double().cuda()
+            layer_xtx_matrices[name] = raw_scaling_diag_matrix.cpu().clone().float()
             try:
                 scaling_diag_matrix = torch.linalg.cholesky(raw_scaling_diag_matrix).float()
                 subset[name].scaling_diag_matrix = scaling_diag_matrix
@@ -162,6 +168,7 @@ def get_whiten_scale_matrix(model, tokenizer, args, dev):
                     logger.warning("raw scaling_diag_matrix is not a symmetric matrix!")
                 eigenvalues = torch.linalg.eigvalsh(raw_scaling_diag_matrix)
                 raw_scaling_diag_matrix += (- eigenvalues[0] + 1e-3) * torch.eye(raw_scaling_diag_matrix.shape[0]).cuda()
+                layer_xtx_matrices[name] = raw_scaling_diag_matrix.cpu().clone().float()
                 scaling_diag_matrix = torch.linalg.cholesky(raw_scaling_diag_matrix).float()
                 if torch.isnan(scaling_diag_matrix).any():
                     logger.warning("scaling_diag_matrix contains NaN!")
@@ -182,6 +189,7 @@ def get_whiten_scale_matrix(model, tokenizer, args, dev):
             layer_scaling_matrices[name] = scaling_diag_matrix.cpu()
             torch.cuda.empty_cache()
         scaling_matrices.append(layer_scaling_matrices)
+        xtx_matrices.append(layer_xtx_matrices)
         layers[i] = layer.cpu()
         inps = outs
         torch.cuda.empty_cache()
@@ -190,11 +198,17 @@ def get_whiten_scale_matrix(model, tokenizer, args, dev):
     if args.use_cache:
         torch.save(scaling_matrices, cache_file)
         logger.info(f"Save the whiten scale matrix dict to:  {cache_file}")
+        torch.save(xtx_matrices, xtx_cache_file)
+        logger.info(f"Save the raw X^T X matrix dict to: {xtx_cache_file}")
 
 def compress_model_whiten(model, tokenizer, args, dev, selection_result):
     logger.info("Compressing model with whiten decomposition...")
     # NOTE(brian1009): Prepare whiten scaling matrix
     get_whiten_scale_matrix(model, tokenizer, args, dev)
+    # Load cache X^T X
+    model_id = model.config._name_or_path
+    xtx_cache_file = f"cache/xtx/{model_id.replace('/','_')}_xtx_matrices_fp16.pt"
+    all_xtx_matrices = torch.load(xtx_cache_file, map_location=dev)
     # Compress the model
     module_dict = {name: module for name, module in model.named_modules()}
     full_name_dict = {module: name for name, module in model.named_modules()}
@@ -220,16 +234,43 @@ def compress_model_whiten(model, tokenizer, args, dev, selection_result):
         raw_linear = module_dict[layername]
         info = linear_info[raw_linear]
 
-        # TODO ------------------
-        cka_scores = compute_cka_for_linear(raw_linear, dev)
-        raw_linear = reorder_linear_weight(raw_linear, cka_scores)
-        # ---------------------------
+        if "k_proj" in layername:
+            # TODO ------------------
+            # selected_head_rank is for the whole layer
+            # size = number of groups we want in that layer
+            size = 2
+            k = 4 // size
+            cka_scores = compute_cka_for_linear(raw_linear, dev)
+            # TODO: fix group_size
+            raw_linear, inv_perm = reorder_linear_weight(raw_linear, cka_scores, size)
+            selected_head_rank = [r // k for r in selected_head_rank for _ in range(k)]
+            
+            head_wise_svd_linear = HeadwiseLowRankModule.from_linear_whiten(
+                raw_linear,
+                selected_head_rank,
+                inv_perm=inv_perm
+            )
+            setattr(info["father"], info["name"],  head_wise_svd_linear)
+
+        elif "v_proj" in layername:
+            inv_perm = None
+
+            # TODO ------------------
+            match = re.search(r"layers\.(\d+)\.", layername)
+            layer_idx = int(match.group(1)) if match else 0
+            
+            current_layer_xtx_dict = all_xtx_matrices[layer_idx]
+            xtx_key = next((k for k in current_layer_xtx_dict if "v_proj" in k), None)
+            calib_x = current_layer_xtx_dict[xtx_key].to(dev)
+
+            head_wise_svd_linear = HeadwiseLowRankModule.from_linear_calibrated(
+                raw_linear,
+                selected_head_rank,
+                inv_perm=inv_perm,
+                calib_x=calib_x # X^T X
+            )
+            setattr(info["father"], info["name"],  head_wise_svd_linear)
     
-        head_wise_svd_linear = HeadwiseLowRankModule.from_linear_whiten(
-            raw_linear,
-            selected_head_rank
-        )
-        setattr(info["father"], info["name"],  head_wise_svd_linear)
 
 def compress_model_svd(model, selection_result):
     logger.info("Compressing model with svd decomposition...")
