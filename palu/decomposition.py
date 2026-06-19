@@ -7,7 +7,7 @@ import re
 from tqdm import tqdm
 from .data_utils import get_calib_data
 from .model import HeadwiseLowRankModule
-from .model import compute_cka_for_linear, reorder_linear_weight
+from .model import reorder_linear_weight, reorder_linear_weight_based_on_histogram
 
 def find_layers(module, layers=[nn.Conv2d, nn.Linear], name=''):
     if type(module) in layers:
@@ -32,8 +32,10 @@ def get_whiten_scale_matrix(model, tokenizer, args, dev):
     )
     cache_file = f"cache/whiten/{model_id.replace('/','_')}_w2_scaling_matrices_fp16.pt"
     xtx_cache_file = f"cache/xtx/{model_id.replace('/','_')}_xtx_matrices_fp16.pt"
+    hist_cache_file = f"cache/histogram/{model_id.replace('/','_')}_hist_similarity_fp16.pt"
     os.makedirs("cache/whiten", exist_ok=True)
     os.makedirs("cache/xtx", exist_ok=True)
+    os.makedirs("cache/histogram", exist_ok=True)
     """
     cache format:
     [
@@ -123,10 +125,13 @@ def get_whiten_scale_matrix(model, tokenizer, args, dev):
     position_ids = cache['position_ids']
     scaling_matrices = []
     xtx_matrices = []
+    k_proj_histograms = []
+    hist_bins = 64
     logger.info("[Decomposition] Start to calculate the scaling matrix in layer-wise manner...")
     for i in tqdm(range(len(layers))):
         layer = layers[i].to(dev)
         subset = find_layers(layer)
+        head_histograms = None
         def hook(module, input, output):
             inp = input[0].detach().float()
             if inp.dim() == 2:
@@ -134,11 +139,35 @@ def get_whiten_scale_matrix(model, tokenizer, args, dev):
             adds = torch.matmul(inp.transpose(1,2), inp)
             adds_sum = torch.sum(adds, dim=0)
             module.scaling_diag_matrix += adds_sum
+
+            # -------------------------------------------------------------
+            if hasattr(module, 'is_k_proj') and module.is_k_proj:
+                nonlocal head_histograms
+                # output: [batch, seq_len, num_heads * head_dim]
+                k = output.detach()
+                batch_size, seq_len, _ = k.shape
+
+                head_dim = 64
+                num_heads = module.out_features // head_dim
+                k = k.view(batch_size, seq_len, num_heads, head_dim)
+                
+                if head_histograms is None:
+                    head_histograms = torch.zeros((num_heads, hist_bins), device=dev)
+                
+                act_min, act_max = -5.0, 5.0
+                for h in range(num_heads):
+                    head_data = k[:, :, h, :].reshape(-1).float()
+                    hist = torch.histc(head_data, bins=hist_bins, min=act_min, max=act_max)
+                    head_histograms[h] += hist
+            # -------------------------------------------------------------
+
             del inp, adds, adds_sum, output
             torch.cuda.empty_cache()
         handles = []
         for name in subset:
             subset[name].scaling_diag_matrix = 0
+            if "k_proj" in name:
+                subset[name].is_k_proj = True
             handles.append(subset[name].register_forward_hook(hook))
         for j in range(inps.shape[0]):
             outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_masks, position_ids=position_ids[0].unsqueeze(0))[0]
@@ -150,11 +179,14 @@ def get_whiten_scale_matrix(model, tokenizer, args, dev):
         torch.cuda.empty_cache()
         layer_scaling_matrices = {}
         layer_xtx_matrices = {}
+        layer_k_proj_histograms = {}
         for name in subset:
             if not ("k_proj" in name or "v_proj" in name):
                 continue
             raw_scaling_diag_matrix = subset[name].scaling_diag_matrix.double().cuda()
             layer_xtx_matrices[name] = raw_scaling_diag_matrix.cpu().clone().float()
+            if head_histograms is not None:
+                layer_k_proj_histograms[name] = head_histograms.double().cuda()
             try:
                 scaling_diag_matrix = torch.linalg.cholesky(raw_scaling_diag_matrix).float()
                 subset[name].scaling_diag_matrix = scaling_diag_matrix
@@ -190,6 +222,7 @@ def get_whiten_scale_matrix(model, tokenizer, args, dev):
             torch.cuda.empty_cache()
         scaling_matrices.append(layer_scaling_matrices)
         xtx_matrices.append(layer_xtx_matrices)
+        k_proj_histograms.append(layer_k_proj_histograms)
         layers[i] = layer.cpu()
         inps = outs
         torch.cuda.empty_cache()
@@ -200,6 +233,8 @@ def get_whiten_scale_matrix(model, tokenizer, args, dev):
         logger.info(f"Save the whiten scale matrix dict to:  {cache_file}")
         torch.save(xtx_matrices, xtx_cache_file)
         logger.info(f"Save the raw X^T X matrix dict to: {xtx_cache_file}")
+        torch.save(k_proj_histograms, hist_cache_file)
+        logger.info(f"Save the Histogram dict to: {hist_cache_file}")
 
 def compress_model_whiten(model, tokenizer, args, dev, selection_result):
     logger.info("Compressing model with whiten decomposition...")
@@ -209,6 +244,9 @@ def compress_model_whiten(model, tokenizer, args, dev, selection_result):
     model_id = model.config._name_or_path
     xtx_cache_file = f"cache/xtx/{model_id.replace('/','_')}_xtx_matrices_fp16.pt"
     all_xtx_matrices = torch.load(xtx_cache_file, map_location=dev)
+    # Load cache head histograms
+    hist_cache_file = f"cache/histogram/{model_id.replace('/','_')}_hist_similarity_fp16.pt"
+    all_hist = torch.load(hist_cache_file, map_location=dev)
     # Compress the model
     module_dict = {name: module for name, module in model.named_modules()}
     full_name_dict = {module: name for name, module in model.named_modules()}
@@ -229,25 +267,35 @@ def compress_model_whiten(model, tokenizer, args, dev, selection_result):
 
     logger.info(f"Start decompose the layer with selected ranks... #target layers: {len(selection_result.keys())}")
     for layername, selected_head_rank in tqdm(selection_result.items()):
-        logger.debug(f"Decompose {layername} with ranks: {selected_head_rank}")
+        logger.info(f"Decompose {layername} with ranks: {selected_head_rank}")
         # set ratio
         raw_linear = module_dict[layername]
         info = linear_info[raw_linear]
 
+        match = re.search(r"layers\.(\d+)\.", layername)
+        layer_idx = int(match.group(1)) if match else 0
+
         if "k_proj" in layername:
-            # TODO ------------------
+            # TODO: fix group_size
             # selected_head_rank is for the whole layer
             # size = number of groups we want in that layer
+            # TODO: histograms
+            current_layer_hist_dict = all_hist[layer_idx]
+            hist_key = next((k for k in current_layer_hist_dict if "k_proj" in k), None)
+            hist = current_layer_hist_dict[hist_key].to(dev)
+
             size = 2
-            k = 4 // size
-            cka_scores = compute_cka_for_linear(raw_linear, dev)
-            # TODO: fix group_size
-            raw_linear, inv_perm = reorder_linear_weight(raw_linear, cka_scores, size)
-            selected_head_rank = [r // k for r in selected_head_rank for _ in range(k)]
-            
+            head_dim = 64
+            n_heads = raw_linear.weight.data.size(0) // head_dim
+            raw_linear, group_to_heads, inv_perm = reorder_linear_weight(raw_linear, size, dev)
+            # raw_linear, group_to_heads, inv_perm = reorder_linear_weight_based_on_histogram(raw_linear, hist, size, dev)
+
+            selected_head_rank = [r // n_heads * len(g) for r in selected_head_rank for g in group_to_heads]
+
             head_wise_svd_linear = HeadwiseLowRankModule.from_linear_whiten(
                 raw_linear,
                 selected_head_rank,
+                group_to_heads,
                 inv_perm=inv_perm
             )
             setattr(info["father"], info["name"],  head_wise_svd_linear)
@@ -256,9 +304,6 @@ def compress_model_whiten(model, tokenizer, args, dev, selection_result):
             inv_perm = None
 
             # TODO ------------------
-            match = re.search(r"layers\.(\d+)\.", layername)
-            layer_idx = int(match.group(1)) if match else 0
-            
             current_layer_xtx_dict = all_xtx_matrices[layer_idx]
             xtx_key = next((k for k in current_layer_xtx_dict if "v_proj" in k), None)
             calib_x = current_layer_xtx_dict[xtx_key].to(dev)

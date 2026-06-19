@@ -1,5 +1,9 @@
 import torch
 import torch.nn as nn
+from scipy.stats import wasserstein_distance
+import numpy as np
+from sklearn.cluster import AgglomerativeClustering
+from collections import defaultdict
 
 
 def _linear_cka(X: torch.Tensor, Y: torch.Tensor, eps: float = 1e-12):
@@ -11,7 +15,6 @@ def _linear_cka(X: torch.Tensor, Y: torch.Tensor, eps: float = 1e-12):
     var_y = torch.norm(Y.T @ Y, p="fro")
 
     return hsic / (var_x * var_y + eps)
-
 
 @torch.no_grad()
 def compute_cka_for_linear(
@@ -46,7 +49,6 @@ def compute_cka_for_linear(
             cka_scores[j, i] = score
             
     return cka_scores
-
 
 def greedy_reorder_from_cka(S: torch.Tensor, group_size: int = 4):
     n = S.size(0)
@@ -107,20 +109,28 @@ def greedy_reorder_from_cka(S: torch.Tensor, group_size: int = 4):
     perm = [h for g in groups for h in g]
     return perm
 
-
 def invert_perm(perm):
     inv = [0] * len(perm)
     for i, p in enumerate(perm):
         inv[p] = i
     return inv
 
-
-def reorder_linear_weight(raw_linear: torch.nn.Linear, cka_scores, group_size):
+@torch.no_grad()
+def reorder_linear_weight(
+    raw_linear: torch.nn.Linear, 
+    group_size: int, 
+    dev: torch.device
+):
+    cka_scores = compute_cka_for_linear(raw_linear, dev)
     # TODO: fix head_dim
     head_dim = 64
 
     perm = greedy_reorder_from_cka(cka_scores, group_size)
     inv_perm = invert_perm(perm)
+
+    group_to_heads = defaultdict(list)
+    for i, item in enumerate(perm):
+        group_to_heads[i // group_size].append(item)
 
     W = raw_linear.weight.data
     n_heads = W.size(0) // head_dim
@@ -135,9 +145,68 @@ def reorder_linear_weight(raw_linear: torch.nn.Linear, cka_scores, group_size):
         bias = bias[perm]
         raw_linear.bias.data = bias.reshape_as(raw_linear.bias.data)
 
-    return raw_linear, inv_perm
+    return raw_linear, group_to_heads, inv_perm
 
 
+@torch.no_grad()
+def cluster_labels(
+    histograms,
+    group_size: int
+):
+    histograms = histograms / (histograms.sum(dim=1, keepdim=True) + 1e-8)
+    head_hist_np = histograms.cpu().numpy()
+
+    num_heads = head_hist_np.shape[0]
+    distance_matrix = np.zeros((num_heads, num_heads), dtype=np.float32)
+    num_group = num_heads // group_size
+
+    for h1 in range(num_heads):
+        for h2 in range(h1, num_heads):
+            dist = wasserstein_distance(head_hist_np[h1], head_hist_np[h2])
+            distance_matrix[h1, h2] = dist
+            distance_matrix[h2, h1] = dist
+
+    clustering = AgglomerativeClustering(n_clusters=num_group, metric="precomputed", linkage="average")
+    group_labels = clustering.fit_predict(distance_matrix)
+    
+    return group_labels
+
+@torch.no_grad()
+def reorder_linear_weight_based_on_histogram(
+    raw_linear: torch.nn.Linear, 
+    histograms,
+    group_size: int, 
+    dev: torch.device
+):
+    group_labels = cluster_labels(histograms, group_size)
+
+    group_to_heads = defaultdict(list)
+    for i, g in enumerate(group_labels):
+        group_to_heads[g].append(i)
+
+    perm = []
+    for g in sorted(group_to_heads.keys()):
+        perm.extend(group_to_heads[g])
+
+    inv_perm = invert_perm(perm)
+
+    # TODO: fix head_dim
+    head_dim = 64
+
+    W = raw_linear.weight.data
+    n_heads = W.size(0) // head_dim
+
+    heads = W.view(n_heads, head_dim, -1)
+    heads = heads[perm]
+
+    raw_linear.weight.data = heads.reshape_as(W)
+
+    if raw_linear.bias is not None:
+        bias = raw_linear.bias.data.view(n_heads, head_dim)
+        bias = bias[perm]
+        raw_linear.bias.data = bias.reshape_as(raw_linear.bias.data)
+
+    return raw_linear, group_to_heads, inv_perm
 
 
 

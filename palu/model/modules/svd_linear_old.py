@@ -53,25 +53,27 @@ def _per_head_decomposition_from_weight(weight, rank):
 class HeadwiseLowRankModule(nn.Module):
     """ Headwise low rank module """
 
-    def __init__(self, ranks, in_features, group_out_features, bias, inv_perm=None):
+    def __init__(self, ranks, in_features, out_features, bias, inv_perm=None):
         super().__init__()
 
 
         self.ranks = ranks
         self.num_groups = len(ranks)
         self.in_features = in_features
-        self.group_out_features = group_out_features
-        self.out_features = sum(group_out_features)
-        self.group_dim = self.out_features // self.num_groups
+        self.out_features = out_features
+        self.group_dim = out_features // self.num_groups
 
-        if len(group_out_features) != self.num_groups:
-            raise ValueError("Size of `ranks` must equal to size of `group_out_features`.")
+        if (self.group_dim * self.num_groups) != self.out_features:
+            raise ValueError(
+                f"out_features must be divisible by num_groups (got `out_features`: {self.out_features}"
+                f" and `num_groups`: {self.num_groups})."
+            )
 
         self.VT = nn.Linear(in_features, sum(ranks), bias=False)
         
         Us = []
-        for r, out_dim in zip(ranks, group_out_features):
-            Us.append(nn.Linear(r, out_dim, bias=bias))
+        for r in ranks:
+            Us.append(nn.Linear(r, self.group_dim, bias=bias))
 
         self.U = nn.ModuleList(Us)    
 
@@ -94,6 +96,7 @@ class HeadwiseLowRankModule(nn.Module):
         outputs = self.reconstruct(low_rank_latents)
         return outputs
     
+    
     def project_to_latent(self, hidden_states:  torch.Tensor):
         """
             hidden_states: Tensor of shape (batch_size, seq_len, in_features)
@@ -107,6 +110,7 @@ class HeadwiseLowRankModule(nn.Module):
             hidden_states: Tensor of shape (batch_size, seq_len, r1 + r2 + ... )
         """
         return hidden_states
+
     
     def reconstruct(self, low_rank_latents: torch.Tensor):
         """
@@ -115,7 +119,7 @@ class HeadwiseLowRankModule(nn.Module):
         outputs = []
         total_ranks = 0
         for i in range(self.num_groups):
-            low_rank_latent = low_rank_latents[:, :, total_ranks: total_ranks + self.ranks[i]]
+            low_rank_latent = low_rank_latents[:, :, total_ranks: total_ranks+self.ranks[i]]
             outputs.append(self.U[i](low_rank_latent))
             total_ranks += self.ranks[i]
 
@@ -182,19 +186,18 @@ class HeadwiseLowRankModule(nn.Module):
     def from_linear_whiten(
         old_module: nn.Linear,
         ranks: list,
-        group_out_features: list,
         inv_perm=None,
     ):
-        new_module = HeadwiseLowRankModule(ranks, old_module.in_features, group_out_features, bias=old_module.bias is not None, inv_perm=inv_perm)
-        w_split = torch.split(old_module.weight.data, group_out_features, dim=0)
+        new_module = HeadwiseLowRankModule(ranks, old_module.in_features, old_module.out_features, bias=old_module.bias is not None, inv_perm=inv_perm)
+        w = old_module.weight.data.reshape(len(ranks), -1, old_module.in_features)
         # Handle the cases where the bias is not None
         if old_module.bias is not None:
-            b_split = torch.split(old_module.bias.data, group_out_features, dim=0)
+            b = old_module.bias.data.reshape(len(ranks), -1)
         
         wl = []
         wr = []
         for i in range(len(ranks)):
-            l, r = _per_head_whiten_decomposition_from_weight(w_split[i], old_module.scaling_diag_matrix, ranks[i])
+            l, r = _per_head_whiten_decomposition_from_weight(w[i], old_module.scaling_diag_matrix, ranks[i])
             # l: (head_dim, rank), r: (rank, hidden_size)
             wl.append(l)
             wr.append(r)
@@ -206,7 +209,7 @@ class HeadwiseLowRankModule(nn.Module):
             new_module.U[i].weight.data = wl[i].contiguous()
             # Handle the cases where the bias is not None
             if old_module.bias is not None:
-                new_module.U[i].bias.data = b_split[i]
+                new_module.U[i].bias.data = b[i]
 
         # load to VT
         # shape (sum(ranks), hidden_size)
@@ -267,7 +270,7 @@ class HeadwiseLowRankModule(nn.Module):
         new_module.VT.weight.data = VT_weight
         
         return new_module
-    
+
     @staticmethod
     def from_linear(
         old_module: nn.Linear,
