@@ -248,6 +248,7 @@ def compress_model_whiten(model, tokenizer, args, dev, selection_result):
     hist_cache_file = f"cache/histogram/{model_id.replace('/','_')}_hist_similarity_fp16.pt"
     all_hist = torch.load(hist_cache_file, map_location=dev)
     # Compress the model
+    head_dim = model.config.hidden_size // model.config.num_attention_heads
     module_dict = {name: module for name, module in model.named_modules()}
     full_name_dict = {module: name for name, module in model.named_modules()}
     linear_info = {}
@@ -276,23 +277,20 @@ def compress_model_whiten(model, tokenizer, args, dev, selection_result):
         layer_idx = int(match.group(1)) if match else 0
 
         if "k_proj" in layername:
-            # TODO: fix group_size
-            # selected_head_rank is for the whole layer
-            # size = number of groups we want in that layer
             # TODO: histograms
             current_layer_hist_dict = all_hist[layer_idx]
             hist_key = next((k for k in current_layer_hist_dict if "k_proj" in k), None)
             hist = current_layer_hist_dict[hist_key].to(dev)
 
-            size = 2
-            head_dim = 64
+            # size = 2
+            # raw_linear, group_to_heads, inv_perm = reorder_linear_weight(raw_linear, size, dev)
+            num_group = 2
             n_heads = raw_linear.weight.data.size(0) // head_dim
-            raw_linear, group_to_heads, inv_perm = reorder_linear_weight(raw_linear, size, dev)
-            # raw_linear, group_to_heads, inv_perm = reorder_linear_weight_based_on_histogram(raw_linear, hist, size, dev)
+            raw_linear, group_to_heads, inv_perm = reorder_linear_weight_based_on_histogram(raw_linear, hist, num_group, head_dim, dev)
             
-            selected_head_rank = [r // n_heads * len(group_to_heads[g]) for r in selected_head_rank for g in group_to_heads]
+            selected_head_rank = [r * len(group_to_heads[g]) // n_heads for r in selected_head_rank for g in group_to_heads]
             group_out_features = [len(group_to_heads[g]) * head_dim for g in group_to_heads]
-            print(group_out_features)
+            print(selected_head_rank, group_out_features)
 
             head_wise_svd_linear = HeadwiseLowRankModule.from_linear_whiten(
                 raw_linear,
@@ -305,7 +303,6 @@ def compress_model_whiten(model, tokenizer, args, dev, selection_result):
         elif "v_proj" in layername:
             inv_perm = None
 
-            # TODO ------------------
             current_layer_xtx_dict = all_xtx_matrices[layer_idx]
             xtx_key = next((k for k in current_layer_xtx_dict if "v_proj" in k), None)
             calib_x = current_layer_xtx_dict[xtx_key].to(dev)

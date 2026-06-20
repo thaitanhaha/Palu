@@ -19,13 +19,12 @@ def _linear_cka(X: torch.Tensor, Y: torch.Tensor, eps: float = 1e-12):
 @torch.no_grad()
 def compute_cka_for_linear(
     raw_linear: nn.Linear,
+    head_dim: int,
     dev: torch.device,
 ):
     W = raw_linear.weight.detach().to(dev)
 
     out_features, in_features = raw_linear.out_features, raw_linear.in_features
-    # TODO: fix head_dim
-    head_dim = 64
     num_heads = raw_linear.out_features // head_dim
 
     heads = W.view(num_heads, head_dim, in_features)
@@ -119,11 +118,10 @@ def invert_perm(perm):
 def reorder_linear_weight(
     raw_linear: torch.nn.Linear, 
     group_size: int, 
+    head_dim: int,
     dev: torch.device
 ):
     cka_scores = compute_cka_for_linear(raw_linear, dev)
-    # TODO: fix head_dim
-    head_dim = 64
 
     perm = greedy_reorder_from_cka(cka_scores, group_size)
     inv_perm = invert_perm(perm)
@@ -151,14 +149,13 @@ def reorder_linear_weight(
 @torch.no_grad()
 def cluster_labels(
     histograms,
-    group_size: int
+    num_group: int
 ):
     histograms = histograms / (histograms.sum(dim=1, keepdim=True) + 1e-8)
     head_hist_np = histograms.cpu().numpy()
 
     num_heads = head_hist_np.shape[0]
     distance_matrix = np.zeros((num_heads, num_heads), dtype=np.float32)
-    num_group = num_heads // group_size
 
     for h1 in range(num_heads):
         for h2 in range(h1, num_heads):
@@ -175,10 +172,11 @@ def cluster_labels(
 def reorder_linear_weight_based_on_histogram(
     raw_linear: torch.nn.Linear, 
     histograms,
-    group_size: int, 
+    num_group: int, 
+    head_dim: int,
     dev: torch.device
 ):
-    group_labels = cluster_labels(histograms, group_size)
+    group_labels = cluster_labels(histograms, num_group)
 
     group_to_heads = defaultdict(list)
     for i, g in enumerate(group_labels):
@@ -189,9 +187,6 @@ def reorder_linear_weight_based_on_histogram(
         perm.extend(group_to_heads[g])
 
     inv_perm = invert_perm(perm)
-
-    # TODO: fix head_dim
-    head_dim = 64
 
     W = raw_linear.weight.data
     n_heads = W.size(0) // head_dim

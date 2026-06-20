@@ -81,10 +81,22 @@ def dump_to_huggingface_repos(model, tokenizer, save_path, args):
     
     
 def load_model_and_tokenizer(model_name_or_path, use_flash_attn2=False):
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_name_or_path,
-        trust_remote_code=True,
-    )
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_name_or_path,
+            trust_remote_code=True,
+            use_fast=True,
+        )
+    except Exception as e:
+        print(f"Fast tokenizer failed: {e}")
+        print("Falling back to slow tokenizer...")
+
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_name_or_path,
+            trust_remote_code=True,
+            use_fast=False,
+        )
+
     model = AutoModelForCausalLM.from_pretrained(
         model_name_or_path,
         torch_dtype=torch.float16,

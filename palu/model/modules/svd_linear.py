@@ -240,7 +240,7 @@ class HeadwiseLowRankModule(nn.Module):
             r = ranks[i]
 
             # STEP 1: SVD
-            Lv, Rv = _per_head_whiten_decomposition_from_weight(W, old_module.scaling_diag_matrix, ranks[i])
+            Lv, Rv = _per_head_whiten_decomposition_from_weight(W, old_module.scaling_diag_matrix, r)
 
             # STEP 2: CLOSED-FORM OFFLINE CALIBRATION
             # Lv = W @ XTX @ Rv^T @ (Rv @ XTX @ Rv^T)^(-1)
