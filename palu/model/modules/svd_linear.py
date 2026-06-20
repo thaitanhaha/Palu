@@ -62,7 +62,7 @@ class HeadwiseLowRankModule(nn.Module):
         self.in_features = in_features
         self.group_out_features = group_out_features
         self.out_features = sum(group_out_features)
-        self.group_dim = self.out_features // self.num_groups
+        # self.group_dim = self.out_features // self.num_groups
 
         if len(group_out_features) != self.num_groups:
             raise ValueError("Size of `ranks` must equal to size of `group_out_features`.")
@@ -223,7 +223,8 @@ class HeadwiseLowRankModule(nn.Module):
         inv_perm=None,
         calib_x=None,
     ):
-        new_module = HeadwiseLowRankModule(ranks, old_module.in_features, old_module.out_features, bias=old_module.bias is not None, inv_perm=inv_perm)
+        group_out_features = [old_module.out_features]
+        new_module = HeadwiseLowRankModule(ranks, old_module.in_features, group_out_features, bias=old_module.bias is not None, inv_perm=inv_perm)
         w = old_module.weight.data.reshape(len(ranks), -1, old_module.in_features)
         # Handle the cases where the bias is not None
         if old_module.bias is not None:

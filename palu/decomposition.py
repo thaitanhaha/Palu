@@ -289,13 +289,15 @@ def compress_model_whiten(model, tokenizer, args, dev, selection_result):
             n_heads = raw_linear.weight.data.size(0) // head_dim
             raw_linear, group_to_heads, inv_perm = reorder_linear_weight(raw_linear, size, dev)
             # raw_linear, group_to_heads, inv_perm = reorder_linear_weight_based_on_histogram(raw_linear, hist, size, dev)
-
-            selected_head_rank = [r // n_heads * len(g) for r in selected_head_rank for g in group_to_heads]
+            
+            selected_head_rank = [r // n_heads * len(group_to_heads[g]) for r in selected_head_rank for g in group_to_heads]
+            group_out_features = [len(group_to_heads[g]) * head_dim for g in group_to_heads]
+            print(group_out_features)
 
             head_wise_svd_linear = HeadwiseLowRankModule.from_linear_whiten(
                 raw_linear,
                 selected_head_rank,
-                group_to_heads,
+                group_out_features,
                 inv_perm=inv_perm
             )
             setattr(info["father"], info["name"],  head_wise_svd_linear)

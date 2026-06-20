@@ -9,6 +9,8 @@ class PaluLlamaForCausalLM(LlamaForCausalLM):
     def __init__(self, config:PaluLlamaConfig):
         super().__init__(config)
         self.head_wise_ranks=config.head_wise_ranks
+        self.group_out_features=config.group_out_features
+        self.inv_perm=config.inv_perm
 
         full_name_dict = {module: name for name, module in self.named_modules()}
         linear_info = {}
@@ -30,7 +32,14 @@ class PaluLlamaForCausalLM(LlamaForCausalLM):
         for name,module in self.named_modules():
             if name in self.head_wise_ranks:
                 info=linear_info[module]
-                new_layer=HeadwiseLowRankModule(self.head_wise_ranks[name],module.in_features,module.out_features,bias=module.bias is not None)
+                # new_layer=HeadwiseLowRankModule(self.head_wise_ranks[name],module.in_features,module.out_features,bias=module.bias is not None)
+                new_layer=HeadwiseLowRankModule(
+                    self.head_wise_ranks[name],
+                    module.in_features,
+                    self.group_out_features[name],
+                    module.bias is not None,
+                    self.inv_perm[name]
+                )
                 setattr(info["father"], info["name"], new_layer)
     
     

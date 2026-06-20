@@ -54,9 +54,13 @@ def dump_to_huggingface_repos(model, tokenizer, save_path, args):
     model.save_pretrained(save_path)
     config = model.config.to_dict()
     config["head_wise_ranks"] = {}
+    config["group_out_features"] = {}
+    config["inv_perm"] = {}
     for name, module in model.named_modules():
         if isinstance(module, HeadwiseLowRankModule):
             config["head_wise_ranks"][name] = module.ranks
+            config["group_out_features"][name] = module.group_out_features
+            config["inv_perm"][name] = module.inv_perm.tolist() if module.inv_perm is not None else None
     
     if "llama" in model.config._name_or_path.lower() or model.config.model_type == "llama":
         config["model_type"] = "palullama"
