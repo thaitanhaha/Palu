@@ -7,7 +7,7 @@ import re
 from tqdm import tqdm
 from .data_utils import get_calib_data
 from .model import HeadwiseLowRankModule
-from .model import reorder_linear_weight, reorder_linear_weight_based_on_histogram
+from .model import reorder_linear_weight, reorder_linear_weight_cka_cluster, reorder_linear_weight_based_on_histogram
 
 def find_layers(module, layers=[nn.Conv2d, nn.Linear], name=''):
     if type(module) in layers:
@@ -282,11 +282,11 @@ def compress_model_whiten(model, tokenizer, args, dev, selection_result):
             hist_key = next((k for k in current_layer_hist_dict if "k_proj" in k), None)
             hist = current_layer_hist_dict[hist_key].to(dev)
 
-            # size = 2
-            # raw_linear, group_to_heads, inv_perm = reorder_linear_weight(raw_linear, size, dev)
             num_group = 2
             n_heads = raw_linear.weight.data.size(0) // head_dim
-            raw_linear, group_to_heads, inv_perm = reorder_linear_weight_based_on_histogram(raw_linear, hist, num_group, head_dim, dev)
+            # raw_linear, group_to_heads, inv_perm = reorder_linear_weight(raw_linear, num_group, head_dim, dev)
+            raw_linear, group_to_heads, inv_perm = reorder_linear_weight_cka_cluster(raw_linear, num_group, head_dim, dev)
+            # raw_linear, group_to_heads, inv_perm = reorder_linear_weight_based_on_histogram(raw_linear, hist, num_group, head_dim, dev)
             
             selected_head_rank = [r * len(group_to_heads[g]) // n_heads for r in selected_head_rank for g in group_to_heads]
             group_out_features = [len(group_to_heads[g]) * head_dim for g in group_to_heads]

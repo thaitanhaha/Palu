@@ -117,11 +117,16 @@ def invert_perm(perm):
 @torch.no_grad()
 def reorder_linear_weight(
     raw_linear: torch.nn.Linear, 
-    group_size: int, 
+    num_group: int, 
     head_dim: int,
     dev: torch.device
 ):
-    cka_scores = compute_cka_for_linear(raw_linear, dev)
+    W = raw_linear.weight.data
+    n_heads = W.size(0) // head_dim
+
+    group_size = n_heads // num_group
+
+    cka_scores = compute_cka_for_linear(raw_linear, head_dim, dev)
 
     perm = greedy_reorder_from_cka(cka_scores, group_size)
     inv_perm = invert_perm(perm)
@@ -129,9 +134,6 @@ def reorder_linear_weight(
     group_to_heads = defaultdict(list)
     for i, item in enumerate(perm):
         group_to_heads[i // group_size].append(item)
-
-    W = raw_linear.weight.data
-    n_heads = W.size(0) // head_dim
 
     heads = W.view(n_heads, head_dim, -1)
     heads = heads[perm]
@@ -145,9 +147,58 @@ def reorder_linear_weight(
 
     return raw_linear, group_to_heads, inv_perm
 
+@torch.no_grad()
+def cluster_labels_based_on_cka(
+    cka_scores: torch.Tensor,
+    num_group: int,
+):
+    cka_np = cka_scores.detach().cpu().numpy()
+
+    distance_matrix = 1.0 - cka_np
+
+    clustering = AgglomerativeClustering(n_clusters=num_group, metric="precomputed", linkage="average")
+    group_labels = clustering.fit_predict(distance_matrix)
+    
+    return group_labels
 
 @torch.no_grad()
-def cluster_labels(
+def reorder_linear_weight_cka_cluster(
+    raw_linear: nn.Linear,
+    num_group: int,
+    head_dim: int,
+    dev: torch.device,
+):
+    W = raw_linear.weight.data
+    n_heads = W.size(0) // head_dim
+
+    cka_scores = compute_cka_for_linear(raw_linear, head_dim, dev)
+
+    group_labels = cluster_labels_based_on_cka(cka_scores, num_group)
+
+    group_to_heads = defaultdict(list)
+    for i, g in enumerate(group_labels):
+        group_to_heads[g].append(i)
+
+    perm = []
+    for g in sorted(group_to_heads.keys()):
+        perm.extend(group_to_heads[g])
+
+    inv_perm = invert_perm(perm)
+
+    heads = W.view(n_heads, head_dim, -1)
+    heads = heads[perm]
+
+    raw_linear.weight.data = heads.reshape_as(W)
+
+    if raw_linear.bias is not None:
+        bias = raw_linear.bias.data.view(n_heads, head_dim)
+        bias = bias[perm]
+        raw_linear.bias.data = bias.reshape_as(raw_linear.bias.data)
+
+    return raw_linear, group_to_heads, inv_perm
+
+@torch.no_grad()
+def cluster_labels_based_on_histogram(
     histograms,
     num_group: int
 ):
@@ -176,7 +227,7 @@ def reorder_linear_weight_based_on_histogram(
     head_dim: int,
     dev: torch.device
 ):
-    group_labels = cluster_labels(histograms, num_group)
+    group_labels = cluster_labels_based_on_histogram(histograms, num_group)
 
     group_to_heads = defaultdict(list)
     for i, g in enumerate(group_labels):

@@ -1,2 +1,2 @@
 from .svd_linear import HeadwiseLowRankModule
-from .cka import reorder_linear_weight, reorder_linear_weight_based_on_histogram
+from .cka import reorder_linear_weight, reorder_linear_weight_cka_cluster, reorder_linear_weight_based_on_histogram
