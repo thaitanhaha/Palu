@@ -30,7 +30,13 @@ class PaluMistralForCausalLM(MistralForCausalLM):
         for name,module in self.named_modules():
             if name in self.head_wise_ranks:
                 info=linear_info[module]
-                new_layer=HeadwiseLowRankModule(self.head_wise_ranks[name],module.in_features,module.out_features,bias=module.bias is not None)
+                new_layer=HeadwiseLowRankModule(
+                    self.head_wise_ranks[name],
+                    module.in_features,
+                    self.group_out_features[name],
+                    module.bias is not None,
+                    self.inv_perm[name]
+                )
                 setattr(info["father"], info["name"], new_layer)
                 
         

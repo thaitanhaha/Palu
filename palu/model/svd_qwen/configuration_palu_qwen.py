@@ -59,3 +59,5 @@ class PaluQwen2Config(PretrainedConfig):
 
         # for avsd
         self.head_wise_ranks = head_wise_ranks
+        self.group_out_features = kwargs.pop("group_out_features", None)
+        self.inv_perm = kwargs.pop("inv_perm", None)
