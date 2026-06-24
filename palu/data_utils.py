@@ -26,10 +26,10 @@ def get_calib_data(name, tokenizer, model_id, nsamples, seqlen=2048, seed=3):
         )
         tot_text = "\n\n".join(traindata["text"])
     elif name == "wikitext2":
-        traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+        traindata = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="train")
         tot_text = "\n\n".join(traindata["text"])
     elif name == "wikitext2_mini":
-        traindata = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+        traindata = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="train")
         traindata = traindata.select(range(50))
         tot_text = "\n\n".join(traindata["text"])
         nsamples = 50

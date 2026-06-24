@@ -10,6 +10,12 @@ from .svd_mistral import (
     PaluMistralForCausalLM
 )
 
+#mistral3
+from .svd_mistral_3 import (
+    PaluMistral3Config,
+    PaluMistral3ForCausalLM
+)
+
 #qwen
 from .svd_qwen import (
     PaluQwen2Config,
@@ -34,6 +40,10 @@ AVAILABLE_MODELS = {
     'mistral': {
         'config': PaluMistralConfig,
         'ModelForCausalLM': PaluMistralForCausalLM
+    },
+    'mistral3': {
+        'config': PaluMistral3Config,
+        'ModelForCausalLM': PaluMistral3ForCausalLM
     },
     'qwen2': {
         'config': PaluQwen2Config,

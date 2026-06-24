@@ -130,7 +130,7 @@ class PaluLlamaConfig(PretrainedConfig):
         self.use_cache = use_cache
         self.rope_theta = rope_theta
         self.rope_scaling = rope_scaling
-        self._rope_scaling_validation()
+        # self._rope_scaling_validation()
         self.attention_bias = attention_bias
 
         super().__init__(
