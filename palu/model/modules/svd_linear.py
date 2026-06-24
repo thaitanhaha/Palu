@@ -231,16 +231,19 @@ class HeadwiseLowRankModule(nn.Module):
             b = old_module.bias.data.reshape(len(ranks), -1)
 
         XTX = calib_x.to(torch.float32)
+        device = XTX.device
 
         wl = []
         wr = []
 
         for i in range(len(ranks)):
             W = w[i].to(torch.float32)
+            W = W.to(device)
             r = ranks[i]
 
             # STEP 1: SVD
             Lv, Rv = _per_head_whiten_decomposition_from_weight(W, old_module.scaling_diag_matrix, r)
+            Rv = Rv.to(device)
 
             # STEP 2: CLOSED-FORM OFFLINE CALIBRATION
             # Lv = W @ XTX @ Rv^T @ (Rv @ XTX @ Rv^T)^(-1)

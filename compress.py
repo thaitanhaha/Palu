@@ -121,7 +121,7 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--reorder_method",
-        type=int,
+        type=str,
         default='histograms',
         choices=['cka_static', 'cka_dynamic', 'histograms'],
         help="Reorder method"
