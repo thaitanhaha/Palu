@@ -20,7 +20,7 @@ from .svd_qwen import (
 from .modules import (
     HeadwiseLowRankModule
 )
-from .modules import reorder_linear_weight, reorder_linear_weight_cka_cluster, reorder_linear_weight_based_on_histogram
+from .modules import reorder_cka_static, reorder_cka_dynamic, reorder_histogram_dynamic
 
 #TODO Mistral
 

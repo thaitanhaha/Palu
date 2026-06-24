@@ -3,7 +3,15 @@ import torch.nn as nn
 from scipy.stats import wasserstein_distance
 import numpy as np
 from sklearn.cluster import AgglomerativeClustering
+from sklearn.metrics import silhouette_score
 from collections import defaultdict
+
+
+def invert_perm(perm):
+    inv = [0] * len(perm)
+    for i, p in enumerate(perm):
+        inv[p] = i
+    return inv
 
 
 def _linear_cka(X: torch.Tensor, Y: torch.Tensor, eps: float = 1e-12):
@@ -49,9 +57,10 @@ def compute_cka_for_linear(
             
     return cka_scores
 
-def greedy_reorder_from_cka(S: torch.Tensor, group_size: int = 4):
+
+def greedy_reorder_based_on_cka(S_original: torch.Tensor, group_size: int = 4):
     n = S.size(0)
-    S = S.clone()
+    S = S_original.clone()
 
     S.fill_diagonal_(-1)
 
@@ -108,14 +117,8 @@ def greedy_reorder_from_cka(S: torch.Tensor, group_size: int = 4):
     perm = [h for g in groups for h in g]
     return perm
 
-def invert_perm(perm):
-    inv = [0] * len(perm)
-    for i, p in enumerate(perm):
-        inv[p] = i
-    return inv
-
 @torch.no_grad()
-def reorder_linear_weight(
+def reorder_cka_static(
     raw_linear: torch.nn.Linear, 
     num_group: int, 
     head_dim: int,
@@ -128,7 +131,7 @@ def reorder_linear_weight(
 
     cka_scores = compute_cka_for_linear(raw_linear, head_dim, dev)
 
-    perm = greedy_reorder_from_cka(cka_scores, group_size)
+    perm = greedy_reorder_based_on_cka(cka_scores, group_size)
     inv_perm = invert_perm(perm)
 
     group_to_heads = defaultdict(list)
@@ -147,24 +150,34 @@ def reorder_linear_weight(
 
     return raw_linear, group_to_heads, inv_perm
 
+
 @torch.no_grad()
 def cluster_labels_based_on_cka(
     cka_scores: torch.Tensor,
-    num_group: int,
 ):
     cka_np = cka_scores.detach().cpu().numpy()
 
     distance_matrix = 1.0 - cka_np
 
-    clustering = AgglomerativeClustering(n_clusters=num_group, metric="precomputed", linkage="average")
-    group_labels = clustering.fit_predict(distance_matrix)
+    best_group_labels = -1
+    best_score = -1
+
+    max_clusters = min(10, cka_scores.shape[0])
+    for n_clusters in range(2, max_clusters):
+        clustering = AgglomerativeClustering(n_clusters=n_clusters, metric="precomputed", linkage="average")
+        group_labels = clustering.fit_predict(distance_matrix)
+
+        score = silhouette_score(distance_matrix, group_labels, metric="precomputed")
+
+        if score > best_score:
+            best_score = score
+            best_group_labels = group_labels
     
-    return group_labels
+    return best_group_labels
 
 @torch.no_grad()
-def reorder_linear_weight_cka_cluster(
+def reorder_cka_dynamic(
     raw_linear: nn.Linear,
-    num_group: int,
     head_dim: int,
     dev: torch.device,
 ):
@@ -173,7 +186,7 @@ def reorder_linear_weight_cka_cluster(
 
     cka_scores = compute_cka_for_linear(raw_linear, head_dim, dev)
 
-    group_labels = cluster_labels_based_on_cka(cka_scores, num_group)
+    group_labels = cluster_labels_based_on_cka(cka_scores)
 
     group_to_heads = defaultdict(list)
     for i, g in enumerate(group_labels):
@@ -197,10 +210,10 @@ def reorder_linear_weight_cka_cluster(
 
     return raw_linear, group_to_heads, inv_perm
 
+
 @torch.no_grad()
 def cluster_labels_based_on_histogram(
-    histograms,
-    num_group: int
+    histograms
 ):
     histograms = histograms / (histograms.sum(dim=1, keepdim=True) + 1e-8)
     head_hist_np = histograms.cpu().numpy()
@@ -214,20 +227,30 @@ def cluster_labels_based_on_histogram(
             distance_matrix[h1, h2] = dist
             distance_matrix[h2, h1] = dist
 
-    clustering = AgglomerativeClustering(n_clusters=num_group, metric="precomputed", linkage="average")
-    group_labels = clustering.fit_predict(distance_matrix)
+    best_group_labels = -1
+    best_score = -1
+
+    max_clusters = min(10, num_heads)
+    for n_clusters in range(2, max_clusters):
+        clustering = AgglomerativeClustering(n_clusters=n_clusters, metric="precomputed", linkage="average")
+        group_labels = clustering.fit_predict(distance_matrix)
+
+        score = silhouette_score(distance_matrix, group_labels, metric="precomputed")
+
+        if score > best_score:
+            best_score = score
+            best_group_labels = group_labels
     
-    return group_labels
+    return best_group_labels
 
 @torch.no_grad()
-def reorder_linear_weight_based_on_histogram(
+def reorder_histogram_dynamic(
     raw_linear: torch.nn.Linear, 
     histograms,
-    num_group: int, 
     head_dim: int,
     dev: torch.device
 ):
-    group_labels = cluster_labels_based_on_histogram(histograms, num_group)
+    group_labels = cluster_labels_based_on_histogram(histograms)
 
     group_to_heads = defaultdict(list)
     for i, g in enumerate(group_labels):

@@ -22,7 +22,7 @@ def compress(args):
     compress_model(model, tokenizer, args, args.device, search_results)
     
     if args.dump_huggingface_model:
-        save_folder = f"{args.model_id.split('/')[-1]}_ratio-{args.param_ratio_target}_gs-{args.head_group_size}-{args.search_method}-{args.decompose_method}"
+        save_folder = f"{args.model_id.split('/')[-1]}_ratio-{args.param_ratio_target}_gs-{args.decompose_method}-{args.reorder_method}"
         dump_to_huggingface_repos(model, tokenizer, save_folder, args)
         logger.info(f"Huggingface model is saved to {save_folder}", fg="green")
     
@@ -93,7 +93,7 @@ if __name__ == "__main__":
         "--head_group_size",
         type=int,
         default=4,
-        help="Group size for group-wise decomposition."
+        help="Group size for group-wise decomposition (only for cka_static)."
     )
 
 
@@ -110,21 +110,27 @@ if __name__ == "__main__":
         action="store_true",
         help="Whether to print verbose information or not."
     )
-    
-    parser.add_argument(
-        "--search_method",
-        type=str,
-        default="fisher_uniform",
-        choices=["fisher", "fisher_uniform", "uniform"],
-        help="Search method",
-    )
-    
+        
     parser.add_argument(
         '--decompose_method',
         type=str,
         default='whiten',
         choices=['whiten', 'svd'],
         help='Decomposition method'
+    )
+
+    parser.add_argument(
+        "--reorder_method",
+        type=int,
+        default='histograms',
+        choices=['cka_static', 'cka_dynamic', 'histograms'],
+        help="Reorder method"
+    )
+
+    parser.add_argument(
+        "--compress_V",
+        action="store_true",
+        help="Compress V or not compress V"
     )
     
     args = parser.parse_args()

@@ -7,7 +7,7 @@ import re
 from tqdm import tqdm
 from .data_utils import get_calib_data
 from .model import HeadwiseLowRankModule
-from .model import reorder_linear_weight, reorder_linear_weight_cka_cluster, reorder_linear_weight_based_on_histogram
+from .model import reorder_cka_static, reorder_cka_dynamic, reorder_histogram_dynamic
 
 def find_layers(module, layers=[nn.Conv2d, nn.Linear], name=''):
     if type(module) in layers:
@@ -127,6 +127,7 @@ def get_whiten_scale_matrix(model, tokenizer, args, dev):
     xtx_matrices = []
     k_proj_histograms = []
     hist_bins = 64
+    head_dim = model.config.hidden_size // model.config.num_attention_heads
     logger.info("[Decomposition] Start to calculate the scaling matrix in layer-wise manner...")
     for i in tqdm(range(len(layers))):
         layer = layers[i].to(dev)
@@ -147,7 +148,6 @@ def get_whiten_scale_matrix(model, tokenizer, args, dev):
                 k = output.detach()
                 batch_size, seq_len, _ = k.shape
 
-                head_dim = 64
                 num_heads = module.out_features // head_dim
                 k = k.view(batch_size, seq_len, num_heads, head_dim)
                 
@@ -247,6 +247,9 @@ def compress_model_whiten(model, tokenizer, args, dev, selection_result):
     # Load cache head histograms
     hist_cache_file = f"cache/histogram/{model_id.replace('/','_')}_hist_similarity_fp16.pt"
     all_hist = torch.load(hist_cache_file, map_location=dev)
+    # Load some args
+    num_group = model.config.num_key_value_heads // args.head_group_size
+    reorder_method = args.reorder_method
     # Compress the model
     head_dim = model.config.hidden_size // model.config.num_attention_heads
     module_dict = {name: module for name, module in model.named_modules()}
@@ -277,16 +280,17 @@ def compress_model_whiten(model, tokenizer, args, dev, selection_result):
         layer_idx = int(match.group(1)) if match else 0
 
         if "k_proj" in layername:
-            # TODO: histograms
             current_layer_hist_dict = all_hist[layer_idx]
             hist_key = next((k for k in current_layer_hist_dict if "k_proj" in k), None)
             hist = current_layer_hist_dict[hist_key].to(dev)
 
-            num_group = 2
             n_heads = raw_linear.weight.data.size(0) // head_dim
-            # raw_linear, group_to_heads, inv_perm = reorder_linear_weight(raw_linear, num_group, head_dim, dev)
-            raw_linear, group_to_heads, inv_perm = reorder_linear_weight_cka_cluster(raw_linear, num_group, head_dim, dev)
-            # raw_linear, group_to_heads, inv_perm = reorder_linear_weight_based_on_histogram(raw_linear, hist, num_group, head_dim, dev)
+            if reorder_method == "cka_static":
+                raw_linear, group_to_heads, inv_perm = reorder_cka_static(raw_linear, num_group, head_dim, dev)
+            elif reorder_method == "cka_dynamic":
+                raw_linear, group_to_heads, inv_perm = reorder_cka_dynamic(raw_linear, head_dim, dev)
+            elif reorder_method == "histograms":
+                raw_linear, group_to_heads, inv_perm = reorder_histogram_dynamic(raw_linear, hist, head_dim, dev)
             
             selected_head_rank = [r * len(group_to_heads[g]) // n_heads for r in selected_head_rank for g in group_to_heads]
             group_out_features = [len(group_to_heads[g]) * head_dim for g in group_to_heads]

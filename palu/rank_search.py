@@ -25,12 +25,6 @@ def replace_with_mean(data):
             result[key] = new_value
     return result
 
-def split_values(data, group_number):
-    result = {}
-    for key, value in data.items():
-        new_value = [v // group_number for v in value for _ in range(group_number)]
-        result[key] = new_value
-    return result
 
 
 def calib_fisher_info(model, calib_loader, device, use_cache=True):
@@ -84,149 +78,65 @@ def calib_fisher_info(model, calib_loader, device, use_cache=True):
     torch.save(all_fisher_info, cache_file)
 
 def rank_search(model: nn.Module, tokenizer, args):
-    logger.info(f"[Rank search] Do rank searching. Search method: {args.search_method}", fg="yellow")
-    if args.search_method == "uniform":
-        target_model_class = AVAILABLE_MODELS[model.config.model_type]["ModelForCausalLM"]
-        total_rank = 0
-        select_result = {}
-        info = target_model_class.get_kv_info(model, args.head_group_size)
+    logger.info(f"[Rank search] Do rank searching with Fisher information.", fg="yellow")
+
+    # Prepare Fisher information
+    calib_loader = get_calib_data(args.calib_dataset, tokenizer, args.model_id, 2048, seqlen=args.calib_seqlen)
+    calib_fisher_info(model, calib_loader, torch.device(args.device), args.use_cache)
+    
+    target_model_class = AVAILABLE_MODELS[model.config.model_type]["ModelForCausalLM"]
         
-        for name, module in model.named_modules():
-            if "k_proj" in name or "v_proj" in name:                
-                module_rank = info.num_lr_groups * info.lr_group_dims
-                total_rank += module_rank
-                
-                select_result.update({name: [info.lr_group_dims*args.param_ratio_target] * info.num_lr_groups})
-
-        select_result = rounding_search_result(select_result)
-        rank_sum = sum([sum(v) for k, v in select_result.items()])
-        logger.info(f"[Rank search] KV-Cache Compression Ratio: {100-(rank_sum / total_rank * 100): .2f}%")
-        return select_result, rank_sum, total_rank    
-    elif args.search_method == "fisher":
-        # Prepare Fisher information
-        calib_loader = get_calib_data(args.calib_dataset, tokenizer, args.model_id, 2048, seqlen=args.calib_seqlen)
-        calib_fisher_info(model, calib_loader, torch.device(args.device), args.use_cache)
-        
-        
-        target_model_class = AVAILABLE_MODELS[model.config.model_type]["ModelForCausalLM"]
-        total_rank = 0
-        fisher_sum = 0.0
-        fisher_info_dict = {}
-        select_result = {}
-        
-        info = target_model_class.get_kv_info(model, args.head_group_size)
-        for name, module in model.named_modules():
-            if "k_proj" in name or "v_proj" in name:
-                module_rank = info.num_lr_groups * info.lr_group_dims
-                total_rank += module_rank
-                
-                select_result.update({name: [info.lr_group_dims] * info.num_lr_groups})
-                
-                fisher = module.fisher_info.reshape(info.num_lr_groups, -1, module.in_features)
-                if not torch.isfinite(fisher).all():
-                    logger.info(fisher)
-                
-                fisher_list = [torch.mean(fisher[i]).item() for i in range(info.num_lr_groups)]
-                fisher_info_dict.update({name: fisher_list})
-                fisher_sum += sum(fisher_list)
-
-
-        target_rank = total_rank * args.param_ratio_target
-        
-        indexes = []
-        select_result_float = {}
-
-        for name, fisher in fisher_info_dict.items():
-            ranks = []
-            for i in range(len(fisher)):
-                rank_float = target_rank * fisher[i] / fisher_sum
-                
-                ranks.append(rank_float)
-                indexes.append((name, i))
-                select_result[name][i] = min(select_result[name][i], math.floor(rank_float))
-
-            select_result_float.update({name: ranks})
-                
-        indexes = sorted(indexes, key=lambda x: select_result_float[x[0]][x[1]] - select_result[x[0]][x[1]])
-        dif = target_rank - sum([sum(v) for k, v in select_result.items()])
-
-
-        while dif > 0:
-            for i in range(len(indexes)):
-                if select_result[indexes[i][0]][indexes[i][1]] == info.lr_group_dims:
-                    continue
-                select_result[indexes[i][0]][indexes[i][1]] += 1
-                dif -= 1
-
-                if dif == 0:
-                    break
-                
-        select_result = rounding_search_result(select_result)
-        rank_sum = sum([sum(v) for k, v in select_result.items()])
-        logger.info(f"[Rank Search] KV-Cache Compression Ratio: {100-(rank_sum / total_rank * 100): .2f}%")
-        
-        return select_result, rank_sum, total_rank    
-    elif args.search_method == "fisher_uniform":
-        # Prepare Fisher information
-        calib_loader = get_calib_data(args.calib_dataset, tokenizer, args.model_id, 2048, seqlen=args.calib_seqlen)
-        calib_fisher_info(model, calib_loader, torch.device(args.device), args.use_cache)
-        
-        target_model_class = AVAILABLE_MODELS[model.config.model_type]["ModelForCausalLM"]
+    total_rank = 0
+    
+    fisher_sum = 0.0
+    fisher_info_dict = {}
+    select_result = {}
+    info = target_model_class.get_kv_info(model, model.config.num_key_value_heads)
+    
+    for name, module in model.named_modules():
+        if "k_proj" in name or "v_proj" in name:
+            module_rank = info.num_lr_groups * info.lr_group_dims
+            total_rank += module_rank
             
-        total_rank = 0
-        
-        fisher_sum = 0.0
-        fisher_info_dict = {}
-        select_result = {}
-        info = target_model_class.get_kv_info(model, model.config.num_key_value_heads)
-        
-        for name, module in model.named_modules():
-            if "k_proj" in name or "v_proj" in name:
-                module_rank = info.num_lr_groups * info.lr_group_dims
-                total_rank += module_rank
-                
-                select_result.update({name: [info.lr_group_dims] * info.num_lr_groups})
-                fisher = module.fisher_info.reshape(info.num_lr_groups, -1, module.in_features)
-                
-                fisher_list = [torch.mean(fisher[i]).item() for i in range(info.num_lr_groups)]
-                fisher_info_dict.update({name: fisher_list})
-                fisher_sum += sum(fisher_list)
-
-
-        target_rank = total_rank * args.param_ratio_target
-        
-        indexes = []
-        select_result_float = {}
-
-        for name, fisher in fisher_info_dict.items():
-            ranks = []
-            for i in range(len(fisher)):
-                rank_float = target_rank * fisher[i] / fisher_sum    
-                ranks.append(rank_float)
-                indexes.append((name, i))
-                select_result[name][i] = min(select_result[name][i], math.floor(rank_float))
-
-            select_result_float.update({name: ranks})
+            select_result.update({name: [info.lr_group_dims] * info.num_lr_groups})
+            fisher = module.fisher_info.reshape(info.num_lr_groups, -1, module.in_features)
             
-        indexes = sorted(indexes, key=lambda x: select_result_float[x[0]][x[1]] - select_result[x[0]][x[1]])
-        dif = target_rank - sum([sum(v) for k, v in select_result.items()])
+            fisher_list = [torch.mean(fisher[i]).item() for i in range(info.num_lr_groups)]
+            fisher_info_dict.update({name: fisher_list})
+            fisher_sum += sum(fisher_list)
 
 
-        while dif > 0:
-            for i in range(len(indexes)):
-                if select_result[indexes[i][0]][indexes[i][1]] == info.lr_group_dims:
-                    continue
-                select_result[indexes[i][0]][indexes[i][1]] += 1
-                dif -= 1
+    target_rank = total_rank * args.param_ratio_target
+    
+    indexes = []
+    select_result_float = {}
 
-                if dif == 0:
-                    break
+    for name, fisher in fisher_info_dict.items():
+        ranks = []
+        for i in range(len(fisher)):
+            rank_float = target_rank * fisher[i] / fisher_sum    
+            ranks.append(rank_float)
+            indexes.append((name, i))
+            select_result[name][i] = min(select_result[name][i], math.floor(rank_float))
+
+        select_result_float.update({name: ranks})
         
-        select_result = split_values(select_result, model.config.num_key_value_heads//args.head_group_size)
-        select_result = rounding_search_result(select_result)
-        rank_sum = sum([sum(v) for k, v in select_result.items()])
-        logger.info(f"[Rank Search] KV-Cache Compression Ratio: {100-(rank_sum / total_rank * 100): .2f}%")
-        
-        return select_result, rank_sum, total_rank
-    else:
-        raise NotImplementedError  
+    indexes = sorted(indexes, key=lambda x: select_result_float[x[0]][x[1]] - select_result[x[0]][x[1]])
+    dif = target_rank - sum([sum(v) for k, v in select_result.items()])
+
+
+    while dif > 0:
+        for i in range(len(indexes)):
+            if select_result[indexes[i][0]][indexes[i][1]] == info.lr_group_dims:
+                continue
+            select_result[indexes[i][0]][indexes[i][1]] += 1
+            dif -= 1
+
+            if dif == 0:
+                break
+    
+    select_result = rounding_search_result(select_result)
+    rank_sum = sum([sum(v) for k, v in select_result.items()])
+    logger.info(f"[Rank Search] KV-Cache Compression Ratio: {100-(rank_sum / total_rank * 100): .2f}%")
+    
+    return select_result, rank_sum, total_rank
