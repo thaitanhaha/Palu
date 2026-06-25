@@ -22,7 +22,8 @@ def compress(args):
     compress_model(model, tokenizer, args, args.device, search_results)
     
     if args.dump_huggingface_model:
-        save_folder = f"{args.model_id.split('/')[-1]}_ratio-{args.param_ratio_target}_gs-{args.decompose_method}-{args.reorder_method}"
+        compress_v_suffix = "-compressV" if args.compress_V else ""
+        save_folder = f"{args.model_id.split('/')[-1]}_ratio-{args.param_ratio_target}-{args.decompose_method}-{args.reorder_method}{compress_v_suffix}"
         dump_to_huggingface_repos(model, tokenizer, save_folder, args)
         logger.info(f"Huggingface model is saved to {save_folder}", fg="green")
     
