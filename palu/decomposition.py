@@ -294,7 +294,7 @@ def compress_model_whiten(model, tokenizer, args, dev, selection_result):
             
             selected_head_rank = [r * len(group_to_heads[g]) // n_heads for r in selected_head_rank for g in group_to_heads]
             group_out_features = [len(group_to_heads[g]) * head_dim for g in group_to_heads]
-            print(selected_head_rank)
+            print(selected_head_rank, group_out_features)
 
             head_wise_svd_linear = HeadwiseLowRankModule.from_linear_whiten(
                 raw_linear,
@@ -304,7 +304,7 @@ def compress_model_whiten(model, tokenizer, args, dev, selection_result):
             )
             setattr(info["father"], info["name"],  head_wise_svd_linear)
 
-        elif "v_proj" in layername and args.compress_V:
+        elif "v_proj" in layername:
             inv_perm = None
 
             current_layer_xtx_dict = all_xtx_matrices[layer_idx]
