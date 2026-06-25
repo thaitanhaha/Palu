@@ -162,7 +162,7 @@ def cluster_labels_based_on_cka(
     best_group_labels = -1
     best_score = -1
 
-    max_clusters = min(10, cka_scores.shape[0])
+    max_clusters = min(10, max(2, cka_scores.shape[0] // 2))
     for n_clusters in range(2, max_clusters):
         clustering = AgglomerativeClustering(n_clusters=n_clusters, metric="precomputed", linkage="average")
         group_labels = clustering.fit_predict(distance_matrix)
@@ -230,7 +230,7 @@ def cluster_labels_based_on_histogram(
     best_group_labels = -1
     best_score = -1
 
-    max_clusters = min(10, num_heads)
+    max_clusters = min(10, max(2, num_heads // 2))
     for n_clusters in range(2, max_clusters):
         clustering = AgglomerativeClustering(n_clusters=n_clusters, metric="precomputed", linkage="average")
         group_labels = clustering.fit_predict(distance_matrix)
