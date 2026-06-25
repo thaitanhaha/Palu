@@ -59,7 +59,7 @@ def compute_cka_for_linear(
 
 
 def greedy_reorder_based_on_cka(S_original: torch.Tensor, group_size: int = 4):
-    n = S.size(0)
+    n = S_original.size(0)
     S = S_original.clone()
 
     S.fill_diagonal_(-1)
