@@ -59,14 +59,15 @@ def compute_cka_for_linear(
 
 
 def greedy_reorder_based_on_cka(S_original: torch.Tensor, group_size: int = 4):
+    assert group_size % 2 == 0, "group_size must be even."
+
     n = S_original.size(0)
     S = S_original.clone()
 
     S.fill_diagonal_(-1)
 
     used = set()
-    groups = []
-
+    pairs = []
     while len(used) < n:
         best_val = -1
         best_pair = None
@@ -81,37 +82,24 @@ def greedy_reorder_based_on_cka(S_original: torch.Tensor, group_size: int = 4):
                     best_val = S[i, j]
                     best_pair = (i, j)
 
-        if best_pair is None:
-            remaining = [h for h in range(n) if h not in used]
-            if remaining:
-                groups.append(remaining)
-                used.update(remaining)
-            break
-
         i, j = best_pair
-        group = [i, j]
-        used.update(group)
+        pair = [i, j]
+        used.add(i)
+        used.add(j)
 
-        while len(group) < group_size and len(used) < n:
-            best_h = None
-            best_score = -float('inf')
+        S[i, :] = -1
+        S[:, i] = -1
+        S[j, :] = -1
+        S[:, j] = -1
 
-            for h in range(n):
-                if h in used:
-                    continue
+        pairs.append(pair)
 
-                score = S[h, group].mean().item()
-
-                if score > best_score:
-                    best_score = score
-                    best_h = h
-
-            if best_h is not None:
-                group.append(best_h)
-                used.add(best_h)
-            else:
-                break
-
+    groups = []
+    pairs_per_group = group_size // 2
+    for i in range(0, len(pairs), pairs_per_group):
+        group = []
+        for pair in pairs[i:i + pairs_per_group]:
+            group.extend(pair)
         groups.append(group)
 
     perm = [h for g in groups for h in g]
