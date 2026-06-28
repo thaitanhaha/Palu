@@ -135,6 +135,8 @@ def main(args):
         logger.info("Evaluating dataset: {}".format(dataset))
         start_time = time.time()
         data = load_dataset('THUDM/LongBench', dataset, split='test')
+        if args.limit is not None:
+            data = data.select(range(min(args.limit, len(data))))
         prompt_format = dataset2prompt[dataset]
         max_gen = dataset2maxlen[dataset]
         preds = get_pred(model, tokenizer, data, max_length, max_gen, prompt_format, dataset, device, model_type)
@@ -172,6 +174,12 @@ if __name__ == '__main__':
         '--datasets', type=lambda s: [item for item in s.split(',')], 
         default=["triviaqa", "qasper", "trec", "samsum", "lcc", "repobench-p", "qmsum", "multi_news"],
         help='The datasets to be evaluated'
+    )
+    parser.add_argument(
+        '--limit',
+        default=None,
+        type=int,
+        help='limit number of test for each task'
     )
     parser.add_argument(
         "--verbose",
