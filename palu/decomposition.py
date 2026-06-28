@@ -32,10 +32,8 @@ def get_whiten_scale_matrix(model, tokenizer, args, dev):
     )
     cache_file = f"cache/whiten/{model_id.replace('/','_')}_w2_scaling_matrices_fp16.pt"
     xtx_cache_file = f"cache/xtx/{model_id.replace('/','_')}_xtx_matrices_fp16.pt"
-    hist_cache_file = f"cache/histogram/{model_id.replace('/','_')}_hist_similarity_fp16.pt"
     os.makedirs("cache/whiten", exist_ok=True)
     os.makedirs("cache/xtx", exist_ok=True)
-    os.makedirs("cache/histogram", exist_ok=True)
     """
     cache format:
     [
@@ -125,14 +123,12 @@ def get_whiten_scale_matrix(model, tokenizer, args, dev):
     position_ids = cache['position_ids']
     scaling_matrices = []
     xtx_matrices = []
-    k_proj_histograms = []
-    hist_bins = 64
     head_dim = model.config.hidden_size // model.config.num_attention_heads
     logger.info("[Decomposition] Start to calculate the scaling matrix in layer-wise manner...")
     for i in tqdm(range(len(layers))):
         layer = layers[i].to(dev)
         subset = find_layers(layer)
-        head_histograms = None
+        
         def hook(module, input, output):
             inp = input[0].detach().float()
             if inp.dim() == 2:
@@ -140,26 +136,6 @@ def get_whiten_scale_matrix(model, tokenizer, args, dev):
             adds = torch.matmul(inp.transpose(1,2), inp)
             adds_sum = torch.sum(adds, dim=0)
             module.scaling_diag_matrix += adds_sum
-
-            # -------------------------------------------------------------
-            if hasattr(module, 'is_k_proj') and module.is_k_proj:
-                nonlocal head_histograms
-                # output: [batch, seq_len, num_heads * head_dim]
-                k = output.detach()
-                batch_size, seq_len, _ = k.shape
-
-                num_heads = module.out_features // head_dim
-                k = k.view(batch_size, seq_len, num_heads, head_dim)
-                
-                if head_histograms is None:
-                    head_histograms = torch.zeros((num_heads, hist_bins), device=dev)
-                
-                act_min, act_max = -5.0, 5.0
-                for h in range(num_heads):
-                    head_data = k[:, :, h, :].reshape(-1).float()
-                    hist = torch.histc(head_data, bins=hist_bins, min=act_min, max=act_max)
-                    head_histograms[h] += hist
-            # -------------------------------------------------------------
 
             del inp, adds, adds_sum, output
             torch.cuda.empty_cache()
@@ -179,14 +155,11 @@ def get_whiten_scale_matrix(model, tokenizer, args, dev):
         torch.cuda.empty_cache()
         layer_scaling_matrices = {}
         layer_xtx_matrices = {}
-        layer_k_proj_histograms = {}
         for name in subset:
             if not ("k_proj" in name or "v_proj" in name):
                 continue
             raw_scaling_diag_matrix = subset[name].scaling_diag_matrix.double().cuda()
             layer_xtx_matrices[name] = raw_scaling_diag_matrix.cpu().clone().float()
-            if head_histograms is not None:
-                layer_k_proj_histograms[name] = head_histograms.double().cuda()
             try:
                 scaling_diag_matrix = torch.linalg.cholesky(raw_scaling_diag_matrix).float()
                 subset[name].scaling_diag_matrix = scaling_diag_matrix
@@ -222,7 +195,6 @@ def get_whiten_scale_matrix(model, tokenizer, args, dev):
             torch.cuda.empty_cache()
         scaling_matrices.append(layer_scaling_matrices)
         xtx_matrices.append(layer_xtx_matrices)
-        k_proj_histograms.append(layer_k_proj_histograms)
         layers[i] = layer.cpu()
         inps = outs
         torch.cuda.empty_cache()
@@ -233,8 +205,6 @@ def get_whiten_scale_matrix(model, tokenizer, args, dev):
         logger.info(f"Save the whiten scale matrix dict to:  {cache_file}")
         torch.save(xtx_matrices, xtx_cache_file)
         logger.info(f"Save the raw X^T X matrix dict to: {xtx_cache_file}")
-        torch.save(k_proj_histograms, hist_cache_file)
-        logger.info(f"Save the Histogram dict to: {hist_cache_file}")
 
 def compress_model_whiten(model, tokenizer, args, dev, selection_result):
     logger.info("Compressing model with whiten decomposition...")
@@ -244,9 +214,6 @@ def compress_model_whiten(model, tokenizer, args, dev, selection_result):
     model_id = model.config._name_or_path
     xtx_cache_file = f"cache/xtx/{model_id.replace('/','_')}_xtx_matrices_fp16.pt"
     all_xtx_matrices = torch.load(xtx_cache_file, map_location=dev)
-    # Load cache head histograms
-    hist_cache_file = f"cache/histogram/{model_id.replace('/','_')}_hist_similarity_fp16.pt"
-    all_hist = torch.load(hist_cache_file, map_location=dev)
     # Load some args
     num_group = model.config.num_key_value_heads // args.head_group_size
     reorder_method = args.reorder_method
@@ -280,17 +247,13 @@ def compress_model_whiten(model, tokenizer, args, dev, selection_result):
         layer_idx = int(match.group(1)) if match else 0
 
         if "k_proj" in layername:
-            current_layer_hist_dict = all_hist[layer_idx]
-            hist_key = next((k for k in current_layer_hist_dict if "k_proj" in k), None)
-            hist = current_layer_hist_dict[hist_key].to(dev)
-
             n_heads = raw_linear.weight.data.size(0) // head_dim
             if reorder_method == "cka_static":
                 raw_linear, group_to_heads, inv_perm = reorder_cka_static(raw_linear, num_group, head_dim, dev)
             elif reorder_method == "cka_dynamic":
                 raw_linear, group_to_heads, inv_perm = reorder_cka_dynamic(raw_linear, head_dim, dev)
             elif reorder_method == "histograms":
-                raw_linear, group_to_heads, inv_perm = reorder_histogram_dynamic(raw_linear, hist, head_dim, dev)
+                raw_linear, group_to_heads, inv_perm = reorder_histogram_dynamic(raw_linear, head_dim, dev)
             
             selected_head_rank = [r * len(group_to_heads[g]) // n_heads for r in selected_head_rank for g in group_to_heads]
             group_out_features = [len(group_to_heads[g]) * head_dim for g in group_to_heads]

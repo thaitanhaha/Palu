@@ -25,11 +25,7 @@ def _linear_cka(X: torch.Tensor, Y: torch.Tensor, eps: float = 1e-12):
     return hsic / (var_x * var_y + eps)
 
 @torch.no_grad()
-def compute_cka_for_linear(
-    raw_linear: nn.Linear,
-    head_dim: int,
-    dev: torch.device,
-):
+def compute_cka_for_linear(raw_linear: nn.Linear, head_dim: int, dev: torch.device):
     W = raw_linear.weight.detach().to(dev)
 
     out_features, in_features = raw_linear.out_features, raw_linear.in_features
@@ -37,12 +33,7 @@ def compute_cka_for_linear(
 
     heads = W.view(num_heads, head_dim, in_features)
 
-    cka_scores = torch.zeros(
-        num_heads,
-        num_heads,
-        device=dev,
-        dtype=W.dtype,
-    )
+    cka_scores = torch.zeros(num_heads, num_heads, device=dev, dtype=W.dtype)
 
     for i in range(num_heads):
         Xi = heads[i].T
@@ -106,12 +97,7 @@ def greedy_reorder_based_on_cka(S_original: torch.Tensor, group_size: int = 4):
     return perm
 
 @torch.no_grad()
-def reorder_cka_static(
-    raw_linear: torch.nn.Linear, 
-    num_group: int, 
-    head_dim: int,
-    dev: torch.device
-):
+def reorder_cka_static(raw_linear: torch.nn.Linear, num_group: int, head_dim: int, dev: torch.device):
     W = raw_linear.weight.data
     n_heads = W.size(0) // head_dim
 
@@ -140,9 +126,7 @@ def reorder_cka_static(
 
 
 @torch.no_grad()
-def cluster_labels_based_on_cka(
-    cka_scores: torch.Tensor,
-):
+def cluster_labels_based_on_cka(cka_scores: torch.Tensor):
     cka_np = cka_scores.detach().cpu().numpy()
 
     distance_matrix = 1.0 - cka_np
@@ -164,11 +148,7 @@ def cluster_labels_based_on_cka(
     return best_group_labels
 
 @torch.no_grad()
-def reorder_cka_dynamic(
-    raw_linear: nn.Linear,
-    head_dim: int,
-    dev: torch.device,
-):
+def reorder_cka_dynamic(raw_linear: nn.Linear, head_dim: int, dev: torch.device):
     W = raw_linear.weight.data
     n_heads = W.size(0) // head_dim
 
@@ -200,10 +180,25 @@ def reorder_cka_dynamic(
 
 
 @torch.no_grad()
-def cluster_labels_based_on_histogram(
-    histograms
-):
-    histograms = histograms / (histograms.sum(dim=1, keepdim=True) + 1e-8)
+def create_head_histograms(raw_linear: torch.nn.Linear, head_dim: int, bins: int = 50, range_min: float = -0.5, range_max: float = 0.5):
+    W = raw_linear.weight.data
+    n_heads = W.size(0) // head_dim
+    hidden_dim = W.size(1)
+    
+    W_heads = W.view(n_heads, head_dim * hidden_dim)
+    
+    histograms = torch.zeros((n_heads, bins), device=W.device)
+    
+    for i in range(n_heads):
+        head_weight = W_heads[i]
+        histograms[i] = torch.histogram(head_weight, bins=bins, range=(range_min, range_max)).hist
+        
+    histograms = histograms / (histograms.sum(dim=-1, keepdim=True) + 1e-8)
+    return histograms
+
+
+@torch.no_grad()
+def cluster_labels_based_on_histogram(histograms):
     head_hist_np = histograms.cpu().numpy()
 
     num_heads = head_hist_np.shape[0]
@@ -231,13 +226,10 @@ def cluster_labels_based_on_histogram(
     
     return best_group_labels
 
+
 @torch.no_grad()
-def reorder_histogram_dynamic(
-    raw_linear: torch.nn.Linear, 
-    histograms,
-    head_dim: int,
-    dev: torch.device
-):
+def reorder_histogram_dynamic(raw_linear: torch.nn.Linear, head_dim: int, dev: torch.device):
+    histograms = create_head_histograms(raw_linear, head_dim, bins=64, range_min=-0.2, range_max=0.2)
     group_labels = cluster_labels_based_on_histogram(histograms)
 
     group_to_heads = defaultdict(list)
