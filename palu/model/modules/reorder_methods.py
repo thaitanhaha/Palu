@@ -13,7 +13,7 @@ def invert_perm(perm):
     return inv
 
 
-def _linear_cka(X: torch.Tensor, Y: torch.Tensor, eps: float = 1e-12):
+def _linear_cka(X: torch.Tensor, Y: torch.Tensor, eps: float = 1e-8):
     X = X - X.mean(dim=0, keepdim=True)
     Y = Y - Y.mean(dim=0, keepdim=True)
 
@@ -21,7 +21,12 @@ def _linear_cka(X: torch.Tensor, Y: torch.Tensor, eps: float = 1e-12):
     var_x = torch.norm(X.T @ X, p="fro")
     var_y = torch.norm(Y.T @ Y, p="fro")
 
-    return hsic / (var_x * var_y + eps)
+    score = hsic / (var_x * var_y + eps)
+
+    if torch.isnan(score) or torch.isinf(score):
+        return torch.tensor(0.0, device=X.device, dtype=X.dtype)
+        
+    return score
 
 
 @torch.no_grad()
