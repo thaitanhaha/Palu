@@ -252,7 +252,7 @@ def compress_model_whiten(model, tokenizer, args, dev, selection_result):
                 raw_linear, group_to_heads, inv_perm = reorder_cka_static(raw_linear, num_group, head_dim, dev)
             elif reorder_method == "cka_dynamic":
                 raw_linear, group_to_heads, inv_perm = reorder_cka_dynamic(raw_linear, head_dim, dev)
-            elif reorder_method == "histograms":
+            elif reorder_method == "wasserstein_dynamic":
                 raw_linear, group_to_heads, inv_perm = reorder_wasserstein_dynamic(raw_linear, head_dim, dev)
             
             selected_head_rank = [r * len(group_to_heads[g]) // n_heads for r in selected_head_rank for g in group_to_heads]

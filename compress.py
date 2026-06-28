@@ -123,8 +123,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--reorder_method",
         type=str,
-        default='histograms',
-        choices=['cka_static', 'cka_dynamic', 'histograms'],
+        default='wasserstein_dynamic',
+        choices=['cka_static', 'cka_dynamic', 'wasserstein_dynamic'],
         help="Reorder method"
     )
 
