@@ -1,2 +1,2 @@
 from .svd_linear import HeadwiseLowRankModule
-from .reorder_methods import reorder_cka_static, reorder_cka_dynamic, reorder_histogram_dynamic
+from .reorder_methods import reorder_cka_static, reorder_cka_dynamic, reorder_wasserstein_dynamic

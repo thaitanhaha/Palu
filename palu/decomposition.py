@@ -7,7 +7,7 @@ import re
 from tqdm import tqdm
 from .data_utils import get_calib_data
 from .model import HeadwiseLowRankModule
-from .model import reorder_cka_static, reorder_cka_dynamic, reorder_histogram_dynamic
+from .model import reorder_cka_static, reorder_cka_dynamic, reorder_wasserstein_dynamic
 
 def find_layers(module, layers=[nn.Conv2d, nn.Linear], name=''):
     if type(module) in layers:
@@ -253,7 +253,7 @@ def compress_model_whiten(model, tokenizer, args, dev, selection_result):
             elif reorder_method == "cka_dynamic":
                 raw_linear, group_to_heads, inv_perm = reorder_cka_dynamic(raw_linear, head_dim, dev)
             elif reorder_method == "histograms":
-                raw_linear, group_to_heads, inv_perm = reorder_histogram_dynamic(raw_linear, head_dim, dev)
+                raw_linear, group_to_heads, inv_perm = reorder_wasserstein_dynamic(raw_linear, head_dim, dev)
             
             selected_head_rank = [r * len(group_to_heads[g]) // n_heads for r in selected_head_rank for g in group_to_heads]
             group_out_features = [len(group_to_heads[g]) * head_dim for g in group_to_heads]
