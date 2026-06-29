@@ -152,6 +152,7 @@ def reorder_cka_static(raw_linear: nn.Linear, num_group: int, head_dim: int, dev
 def reorder_cka_dynamic(raw_linear: nn.Linear, head_dim: int, dev: torch.device):
     cka_scores = compute_cka_for_linear(raw_linear, head_dim, dev)
     distance_matrix = (1.0 - cka_scores).cpu().numpy()
+    np.fill_diagonal(distance_matrix, 0)
 
     group_labels = _find_best_clusters(distance_matrix)
 
