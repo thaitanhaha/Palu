@@ -100,8 +100,9 @@ def _find_best_clusters(distance_matrix):
     best_group_labels = -1
     best_score = -1
 
-    max_clusters = min(10, distance_matrix.shape[0])
-    for n_clusters in range(2, max_clusters):
+    max_clusters = distance_matrix.shape[0] // 2
+    min_clusters = distance_matrix.shape[0] // 4 + 1
+    for n_clusters in range(min_clusters, max_clusters + 1):
         clustering = AgglomerativeClustering(n_clusters=n_clusters, metric="precomputed", linkage="average")
         group_labels = clustering.fit_predict(distance_matrix)
 
