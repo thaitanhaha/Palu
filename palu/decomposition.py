@@ -237,8 +237,9 @@ def compress_model_whiten(model, tokenizer, args, dev, selection_result):
                 modules.append(raw_linear)
 
     logger.info(f"Start decompose the layer with selected ranks... #target layers: {len(selection_result.keys())}")
-    for layername, selected_head_rank in tqdm(selection_result.items()):
-        logger.info(f"Decompose {layername} with ranks: {selected_head_rank}")
+    for layername, rank_budget in tqdm(selection_result.items()):
+        rank_budget = rank_budget[0]
+        logger.info(f"Decompose {layername} with ranks: {rank_budget}")
         # set ratio
         raw_linear = module_dict[layername]
         info = linear_info[raw_linear]
@@ -255,7 +256,7 @@ def compress_model_whiten(model, tokenizer, args, dev, selection_result):
             elif reorder_method == "wasserstein_dynamic":
                 raw_linear, group_to_heads, inv_perm = reorder_wasserstein_dynamic(raw_linear, head_dim, dev)
             
-            selected_head_rank = [r * len(group_to_heads[g]) // n_heads for r in selected_head_rank for g in group_to_heads]
+            selected_head_rank = [rank_budget * len(group_to_heads[g]) // n_heads for g in group_to_heads]
             group_out_features = [len(group_to_heads[g]) * head_dim for g in group_to_heads]
             print(selected_head_rank)
 

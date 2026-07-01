@@ -115,6 +115,99 @@ def _find_best_clusters(distance_matrix):
     return best_group_labels
 
 
+def _find_best_clusters(distance_matrix):
+    best_group_labels = -1
+    best_score = -float('inf')
+
+    max_clusters = distance_matrix.shape[0] // 2
+    min_clusters = distance_matrix.shape[0] // 4 + 1
+    
+    for n_clusters in range(min_clusters, max_clusters + 1):
+        clustering = AgglomerativeClustering(n_clusters=n_clusters, metric="precomputed", linkage="average")
+        group_labels = clustering.fit_predict(distance_matrix)
+
+        base_score = silhouette_score(distance_matrix, group_labels, metric="precomputed")
+        unique_labels, counts = np.unique(group_labels, return_counts=True)
+        
+        penalty = 0
+        for count in counts:
+            if count == 1:
+                penalty += 0.3
+            if count > 8:
+                penalty += 0.2
+            if count % 2 != 0:
+                penalty += 0.05
+
+        total_score = base_score - penalty
+
+        if total_score > best_score:
+            best_score = total_score
+            best_group_labels = group_labels
+    
+    return best_group_labels
+
+
+def _find_best_clusters_via_svd(distance_matrix, heads_flat, R_budget):
+    best_group_labels = -1
+    min_total_error = float('inf')
+
+    max_clusters = distance_matrix.shape[0] // 2
+    min_clusters = distance_matrix.shape[0] // 4 + 1
+
+    for n_clusters in range(min_clusters, max_clusters + 1):
+        # TODO: maybe uniform? neu uniform thi chi xet group co 2 3 4 duoc thoi?
+        clustering = AgglomerativeClustering(n_clusters=n_clusters, metric="precomputed", linkage="average")
+        group_labels = clustering.fit_predict(distance_matrix)
+        
+        unique_labels = np.unique(group_labels)
+        
+        cluster_svd_data = {}
+        total_energy_all_clusters = 0
+        
+        for label in unique_labels:
+            head_indices = np.where(group_labels == label)[0]
+            W_cluster = np.concatenate([heads_flat[idx] for idx in head_indices], axis=0)
+            
+            U, S, Vt = np.linalg.svd(W_cluster, full_matrices=False)
+            
+            cluster_energy = np.sum(S ** 2)
+            total_energy_all_clusters += cluster_energy
+            
+            cluster_svd_data[label] = {"W_cluster": W_cluster, "U": U, "S": S, "Vt": Vt, "energy": cluster_energy}
+        
+        total_layer_error = 0.0
+        used_rank_total = 0
+        
+        for label in unique_labels:
+            data = cluster_svd_data[label]
+            
+            cluster_ratio = data["energy"] / total_energy_all_clusters
+            target_rank = int(np.round(R_budget * cluster_ratio))
+            
+            max_possible_rank = min(data["W_cluster"].shape)
+            target_rank = max(1, min(target_rank, max_possible_rank))
+            
+            used_rank_total += target_rank
+            
+            U_truncated = data["U"][:, :target_rank]
+            S_truncated = np.diag(data["S"][:target_rank])
+            Vt_truncated = data["Vt"][:target_rank, :]
+            W_reconstructed = np.dot(U_truncated, np.dot(S_truncated, Vt_truncated))
+            
+            error = np.linalg.norm(data["W_cluster"] - W_reconstructed, 'fro') ** 2
+            total_layer_error += error
+            
+        rank_penalty = abs(R_budget - used_rank_total) * 1e3 
+        total_layer_error += rank_penalty
+
+        if total_layer_error < min_total_error:
+            min_total_error = total_layer_error
+            best_group_labels = group_labels
+            
+    return best_group_labels
+
+
+
 def _apply_permutation(raw_linear: nn.Linear, perm: list, head_dim: int):
     W = raw_linear.weight.data
     n_heads = W.size(0) // head_dim
