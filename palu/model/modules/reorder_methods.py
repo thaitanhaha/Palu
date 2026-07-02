@@ -115,47 +115,15 @@ def _find_best_clusters(distance_matrix):
     return best_group_labels
 
 
-def _find_best_clusters(distance_matrix):
-    best_group_labels = -1
-    best_score = -float('inf')
-
-    max_clusters = distance_matrix.shape[0] // 2
-    min_clusters = distance_matrix.shape[0] // 4 + 1
-    
-    for n_clusters in range(min_clusters, max_clusters + 1):
-        clustering = AgglomerativeClustering(n_clusters=n_clusters, metric="precomputed", linkage="average")
-        group_labels = clustering.fit_predict(distance_matrix)
-
-        base_score = silhouette_score(distance_matrix, group_labels, metric="precomputed")
-        unique_labels, counts = np.unique(group_labels, return_counts=True)
-        
-        penalty = 0
-        for count in counts:
-            if count == 1:
-                penalty += 0.3
-            if count > 8:
-                penalty += 0.2
-            if count % 2 != 0:
-                penalty += 0.05
-
-        total_score = base_score - penalty
-
-        if total_score > best_score:
-            best_score = total_score
-            best_group_labels = group_labels
-    
-    return best_group_labels
-
-
-def _find_best_clusters_via_svd(distance_matrix, heads_flat, R_budget):
+def _find_best_clusters_via_svd(distance_matrix, heads, R_budget):
     best_group_labels = -1
     min_total_error = float('inf')
+    best_layer_ranks = None
 
     max_clusters = distance_matrix.shape[0] // 2
     min_clusters = distance_matrix.shape[0] // 4 + 1
 
     for n_clusters in range(min_clusters, max_clusters + 1):
-        # TODO: maybe uniform? neu uniform thi chi xet group co 2 3 4 duoc thoi?
         clustering = AgglomerativeClustering(n_clusters=n_clusters, metric="precomputed", linkage="average")
         group_labels = clustering.fit_predict(distance_matrix)
         
@@ -166,7 +134,7 @@ def _find_best_clusters_via_svd(distance_matrix, heads_flat, R_budget):
         
         for label in unique_labels:
             head_indices = np.where(group_labels == label)[0]
-            W_cluster = np.concatenate([heads_flat[idx] for idx in head_indices], axis=0)
+            W_cluster = np.concatenate([heads[idx] for idx in head_indices], axis=0)
             
             U, S, Vt = np.linalg.svd(W_cluster, full_matrices=False)
             
@@ -177,6 +145,7 @@ def _find_best_clusters_via_svd(distance_matrix, heads_flat, R_budget):
         
         total_layer_error = 0.0
         used_rank_total = 0
+        target_layer_ranks = [0] * len(unique_labels)
         
         for label in unique_labels:
             data = cluster_svd_data[label]
@@ -188,6 +157,7 @@ def _find_best_clusters_via_svd(distance_matrix, heads_flat, R_budget):
             target_rank = max(1, min(target_rank, max_possible_rank))
             
             used_rank_total += target_rank
+            target_layer_ranks[label] = target_rank
             
             U_truncated = data["U"][:, :target_rank]
             S_truncated = np.diag(data["S"][:target_rank])
@@ -196,15 +166,13 @@ def _find_best_clusters_via_svd(distance_matrix, heads_flat, R_budget):
             
             error = np.linalg.norm(data["W_cluster"] - W_reconstructed, 'fro') ** 2
             total_layer_error += error
-            
-        rank_penalty = abs(R_budget - used_rank_total) * 1e3 
-        total_layer_error += rank_penalty
 
         if total_layer_error < min_total_error:
             min_total_error = total_layer_error
             best_group_labels = group_labels
+            best_layer_ranks = target_layer_ranks
             
-    return best_group_labels
+    return best_group_labels, best_layer_ranks
 
 
 
@@ -243,12 +211,17 @@ def reorder_cka_static(raw_linear: nn.Linear, num_group: int, head_dim: int, dev
 
 
 @torch.no_grad()
-def reorder_cka_dynamic(raw_linear: nn.Linear, head_dim: int, dev: torch.device):
+def reorder_cka_dynamic(raw_linear: nn.Linear, head_dim: int, R_budget: int, dev: torch.device):
+    W = raw_linear.weight.data
+    n_heads = W.size(0) // head_dim
+    heads = W.view(n_heads, head_dim, W.shape[1]).cpu().numpy().astype(np.float32)
+
     cka_scores = compute_cka_for_linear(raw_linear, head_dim, dev)
     distance_matrix = (1.0 - cka_scores).cpu().numpy()
     np.fill_diagonal(distance_matrix, 0)
 
-    group_labels = _find_best_clusters(distance_matrix)
+    # group_labels = _find_best_clusters(distance_matrix)
+    group_labels, layer_ranks = _find_best_clusters_via_svd(distance_matrix, heads, R_budget)
 
     group_to_heads = defaultdict(list)
     for i, g in enumerate(group_labels):
@@ -259,7 +232,7 @@ def reorder_cka_dynamic(raw_linear: nn.Linear, head_dim: int, dev: torch.device)
         perm.extend(group_to_heads[g])
 
     raw_linear, inv_perm = _apply_permutation(raw_linear, perm, head_dim)
-    return raw_linear, group_to_heads, inv_perm
+    return raw_linear, group_to_heads, layer_ranks, inv_perm
 
 
 
