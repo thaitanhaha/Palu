@@ -251,13 +251,13 @@ def compress_model_whiten(model, tokenizer, args, dev, selection_result):
             n_heads = raw_linear.weight.data.size(0) // head_dim
             if reorder_method == "cka_static":
                 raw_linear, group_to_heads, inv_perm = reorder_cka_static(raw_linear, num_group, head_dim, dev)
+                selected_head_rank = [rank_budget * len(group_to_heads[g]) // n_heads for g in group_to_heads]
             elif reorder_method == "cka_dynamic":
                 raw_linear, group_to_heads, layer_ranks, inv_perm = reorder_cka_dynamic(raw_linear, head_dim, rank_budget, dev)
+                selected_head_rank = [layer_ranks[g] for g in group_to_heads]
             # elif reorder_method == "wasserstein_dynamic":
             #     raw_linear, group_to_heads, inv_perm = reorder_wasserstein_dynamic(raw_linear, head_dim, dev)
             
-            # selected_head_rank = [rank_budget * len(group_to_heads[g]) // n_heads for g in group_to_heads]
-            selected_head_rank = layer_ranks
             group_out_features = [len(group_to_heads[g]) * head_dim for g in group_to_heads]
             print(group_out_features, selected_head_rank)
 
